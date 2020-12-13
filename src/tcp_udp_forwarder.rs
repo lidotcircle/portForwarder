@@ -5,6 +5,7 @@ use std::error::Error;
 use std::result::Result;
 use std::sync::Arc;
 
+#[derive(Clone)]
 pub struct TcpUdpForwarder {
     tcp: Arc<Option<TcpForwarder>>,
     udp: Arc<Option<UdpForwarder>>
@@ -30,7 +31,7 @@ impl TcpUdpForwarder {
             })
         }
 
-    pub fn listen(&mut self) {
+    pub fn listen(&self) {
         let mut tt = None;
         let mut tu = None;
         if self.tcp.is_some() {
@@ -60,6 +61,15 @@ impl TcpUdpForwarder {
         if tu.is_some() {
             tu.unwrap().join().unwrap_or_default();
         }
+    }
+
+#[allow(dead_code)]
+    pub fn close(&self) {
+        match self.udp.as_ref() {
+            Some(udp) => udp.close(),
+            None => {}
+        }
+        // TODO tcp close
     }
 }
 

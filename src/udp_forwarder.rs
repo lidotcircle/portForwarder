@@ -4,6 +4,10 @@ use std::error::Error;
 use std::net::{ToSocketAddrs, SocketAddr};
 use std::collections::HashMap;
 use std::io;
+use std::time;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use crate::utils;
 
@@ -11,9 +15,11 @@ use mio::{ Events, Poll, Token, Interest };
 use mio::net::UdpSocket;
 
 
+#[derive(Clone)]
 pub struct UdpForwarder {
     bindAddr: SocketAddr,
     dstAddr: SocketAddr,
+    close: Arc<AtomicBool>,
 }
 
 fn next(token: &mut Token) -> Token {
@@ -38,7 +44,8 @@ impl UdpForwarder {
 
         Ok(UdpForwarder {
             bindAddr: baddr,
-            dstAddr: daddr
+            dstAddr: daddr,
+            close: Arc::from(AtomicBool::from(false))
         })
     }
 
@@ -51,19 +58,44 @@ impl UdpForwarder {
         let mut token2addr = HashMap::new();
         let mut token2socket = HashMap::new();
         let mut tokenWaitWrite = HashMap::new();
+        let mut token2life: HashMap<Token, time::Instant> = HashMap::new();
         let mut writeBackQueue: Vec<(SocketAddr, Vec<u8>)> = Vec::new();
 
         let mut udpfd = UdpSocket::bind(self.bindAddr)?;
         poll.registry().
             register(&mut udpfd, t1, Interest::READABLE)?;
 
+        let mut outConnections = vec![];
         let mut read_buf = vec![0;1<<16];
         loop {
-            let rs = poll.poll(&mut events, None);
-            if rs.is_err() {
-                rs?
+            for k in token2life.keys() {
+                if token2life.get(k).unwrap().elapsed() > time::Duration::from_secs(3 * 60) {
+                    outConnections.push(*k);
+                }
             }
-            let mut outConnections = vec![];
+            while !outConnections.is_empty() {
+                let t = outConnections.remove(0);
+                let addr = *token2addr.get(&t).unwrap();
+                addr2token.remove(&addr);
+                token2addr.remove(&t);
+                token2socket.remove(&t).unwrap();
+                tokenWaitWrite.remove(&t);
+                token2life.remove(&t);
+            }
+            let rs = poll.poll(&mut events, 
+                               Some(time::Duration::from_millis(1000)));
+            if self.close.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+
+            if rs.is_err() {
+                let err = rs.unwrap_err();
+                if err.kind() == io::ErrorKind::WouldBlock {
+                    continue;
+                } else {
+                    return Err(Box::from(err));
+                }
+            }
 
             for event in events.iter() {
                 match event.token() {
@@ -91,15 +123,13 @@ impl UdpForwarder {
                                         }
 
                                         let write_queue = tokenWaitWrite.get_mut(&t).unwrap();
-                                        // TODO drop
                                         write_queue.push(Vec::from(&read_buf[0..size]));
                                     },
                                     Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                                         cont = false;
                                     },
-                                    Err(_) => {
-                                        cont = false;
-                                        // TODO
+                                    Err(err) => {
+                                        return Err(Box::from(err));
                                     }
                                 }
                             }
@@ -113,10 +143,7 @@ impl UdpForwarder {
                                     Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                                         cont = false;
                                     }
-                                    Err(_) => {
-                                        cont = false;
-                                        // TODO
-                                    }
+                                    Err(_) => {}
                                 }
                             }
 
@@ -127,6 +154,10 @@ impl UdpForwarder {
                     },
                     token => {
                         let sock = token2socket.get_mut(&token).unwrap();
+
+                        if !event.is_error() {
+                            token2life.insert(token, time::Instant::now());
+                        }
 
                         if event.is_readable() {
                             let mut cont = true;
@@ -177,6 +208,10 @@ impl UdpForwarder {
                 }
             }
         }
+    }
+
+    pub fn close(self: &UdpForwarder) {
+        self.close.store(true, Ordering::SeqCst);
     }
 }
 

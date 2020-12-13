@@ -8,5 +8,6 @@ edition = "2018"
 
 [dependencies]
 mio = { version="0.7", features=["os-poll", "net"] }
+regex = "1"
 # tokio= { version="0.3", features=["full"] }
 
