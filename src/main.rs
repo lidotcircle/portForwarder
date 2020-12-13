@@ -8,8 +8,10 @@ use tcp_udp_forwarder::*;
 use regex::Regex;
 
 static USAGE: &'static str = 
-"[-h] <bind_addr> <forward_address>
+"[-htu] <bind_addr> <forward_address>
 
+    -t    disable tcp
+    -u    disable udp
     -h    show help";
 
 fn usage() {
@@ -20,6 +22,8 @@ fn usage() {
 fn main() {
     let mut bind_addr = "";
     let mut forward_addr = "";
+    let mut enable_tcp = true;
+    let mut enable_udp = true;
     let mut args: Vec<String> = std::env::args().collect();
     args.remove(0);
     let valid_ipv4_port = Regex::new(r"^([0-9]{1,3}.){3}[0-9]{1,3}:[0-9]{1,5}$").unwrap();
@@ -29,6 +33,12 @@ fn main() {
             "-h" => {
                 usage();
                 std::process::exit(0);
+            }
+            "-u" => {
+                enable_udp = false;
+            }
+            "-t" => {
+                enable_tcp= false;
             }
             _ => {
                 if valid_ipv4_port.is_match(s) {
@@ -53,7 +63,7 @@ fn main() {
         std::process::exit(-1);
     }
 
-    let forwarder = TcpUdpForwarder::from(&bind_addr,&forward_addr,true,true).unwrap();
+    let forwarder = TcpUdpForwarder::from(&bind_addr,&forward_addr,enable_udp,enable_tcp).unwrap();
     forwarder.listen();
 }
 
