@@ -65,11 +65,15 @@ impl TcpUdpForwarder {
 
 #[allow(dead_code)]
     pub fn close(&self) {
+        match self.tcp.as_ref() {
+            Some(tcp) => tcp.close(),
+            None => {}
+        }
+
         match self.udp.as_ref() {
             Some(udp) => udp.close(),
             None => {}
         }
-        // TODO tcp close
     }
 }
 

@@ -7,7 +7,7 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-mio = { version="0.7", features=["os-poll", "net"] }
+env_logger = "0.10.0"
+log = "0.4.17"
+mio = { version = "0.8", features = ["os-poll", "net"] }
 regex = "1"
-# tokio= { version="0.3", features=["full"] }
-
