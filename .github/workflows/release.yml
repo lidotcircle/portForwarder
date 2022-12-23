@@ -1,0 +1,72 @@
+name: Test
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - v[0-9]+.[0-9]
+
+jobs:
+  setup:
+    runs-on: ubuntu-20.04
+    outputs:
+      release: ${{ steps.release.outputs.release }}
+    steps:
+      - name: release name
+        id: release
+        run: |
+          branch=$(echo ${{github.ref}} | sed 's/refs\/\(heads\|tags\)\///g') && \
+            release=$([[ "$branch" =~ v[0-9.]+ ]] && echo $branch || echo $branch) && \
+            printf "release=%s" "$release" >> $GITHUB_OUTPUT
+
+  BuildOnUbuntu:
+    runs-on: ubuntu-20.04
+    needs: [ setup ]
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          submodules: recursive
+
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: build
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --release --all-features
+
+      - name: release
+        uses: ncipollo/release-action@v1
+        with:
+          allowUpdates: true
+          artifacts: "./target/release/portForwarder"
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag: ${{ needs.setup.outputs.release }}
+
+  BuildOnWindows:
+    runs-on: windows-latest
+    needs: [ setup ]
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          submodules: recursive
+
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: build
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --release --all-features
+
+      - name: release
+        uses: ncipollo/release-action@v1
+        with:
+          allowUpdates: true
+          artifacts: "./target/release/portForwarder.exe"
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag: ${{ needs.setup.outputs.release }}

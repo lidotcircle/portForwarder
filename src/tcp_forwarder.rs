@@ -136,7 +136,7 @@ impl TcpForwarder {
                     let peer_addr = stream.peer_addr().unwrap();
                     let thread_handle = std::thread::spawn(move || tcp_forward(&mut stream, tcp_dst, c2, count));
                     let mut cc = cons.lock().unwrap();
-                    cc.insert(count, ConnectionStat{ peer_addr: peer_addr, join_handler: Some(thread_handle), stop: Arc::from(AtomicBool::from(false)) });
+                    cc.insert(count, ConnectionStat{ peer_addr, join_handler: Some(thread_handle), stop: Arc::from(AtomicBool::from(false)) });
                     count += 1;
                 },
                 Err(err) => {

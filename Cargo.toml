@@ -11,3 +11,4 @@ env_logger = "0.10.0"
 log = "0.4.17"
 mio = { version = "0.8", features = ["os-poll", "net"] }
 regex = "1"
+yaml-rust = "0.4.5"
