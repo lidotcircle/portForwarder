@@ -76,7 +76,8 @@ fn main() {
     let mut args: Vec<String> = std::env::args().collect();
     let mut config_file: Option<String> = None;
     args.remove(0);
-    let valid_ipv4_port = Regex::new(r"^([0-9]{1,3}.){3}[0-9]{1,3}:[0-9]{1,5}$").unwrap();
+    let valid_ipv4_port = Regex::new(
+        r"^(([0-9]{1,3}.){3}[0-9]{1,3}|0-9]{1}|(([0-9]{1}[a-zA-Z]{1})|([a-zA-Z0-9][a-zA-Z0-9-_]{1,61}[a-zA-Z0-9]))\.([a-zA-Z]{2,6}|[a-zA-Z0-9-]{2,30}\.[a-zA-Z]{2,3})|([a-f0-9:]+:+)+[a-f0-9]+|::|localhost):[0-9]{1,5}$").unwrap();
     for i in 0..args.len() {
         let s = args[i].as_str();
         match s {
