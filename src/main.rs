@@ -30,7 +30,9 @@ fn print_example_of_config_file() {
   - local: <bind-address/0.0.0.0:1234>
     remote: <remote-address/127.0.0.1:2233>
     enable_tcp: true # default is true
-    enable_udp: true # default is true");
+    enable_udp: true # default is true
+    allow_nets:
+      - 127.0.0.0/24");
 }
 
 #[derive(Clone)]
@@ -39,6 +41,7 @@ struct ForwardSessionConfig {
     remote: String,
     enable_tcp: bool,
     enable_udp: bool,
+    allow_nets: Vec<String>,
 }
 
 impl ForwardSessionConfig {
@@ -61,8 +64,15 @@ impl ForwardSessionConfig {
         };
         let enable_tcp = yaml["enable_tcp"].as_bool().unwrap_or(true);
         let enable_udp = yaml["enable_udp"].as_bool().unwrap_or(true);
+        let allow_nets_opt = yaml["allow_nets"].as_vec();
+        let allow_nets = vec!();
 
-        Ok(Self {local, remote, enable_tcp, enable_udp})
+        if let Some(nets) = allow_nets_opt {
+            for net in nets {
+            }
+        }
+
+        Ok(Self {local, remote, enable_tcp, enable_udp, allow_nets})
     }
 }
 

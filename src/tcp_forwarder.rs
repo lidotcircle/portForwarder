@@ -9,6 +9,7 @@ use std::io::Error;
 use std::thread::JoinHandle;
 use std::time;
 use log::info;
+use log::debug;
 
 use crate::utils::ArcRel;
 use crate::utils;
@@ -104,6 +105,7 @@ fn tcp_forward(e1: &mut TcpStream, dst: SocketAddr, connections: Arc<Mutex<HashM
     {
         let stat = &locked_connections[&cid];
         info!("close connection from {} to {}", stat.get_peeraddr(), dst);
+        debug!("number of connections {}", locked_connections.len());
     }
     locked_connections.remove(&cid);
 
@@ -138,6 +140,7 @@ impl TcpForwarder {
                     let mut cc = cons.lock().unwrap();
                     cc.insert(count, ConnectionStat{ peer_addr, join_handler: Some(thread_handle), stop: Arc::from(AtomicBool::from(false)) });
                     count += 1;
+                    debug!("number of connections: {}", cc.len());
                 },
                 Err(err) => {
                     if err.kind() == io::ErrorKind::WouldBlock {
