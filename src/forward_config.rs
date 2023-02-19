@@ -9,4 +9,5 @@ pub struct ForwardSessionConfig<T: ToSocketAddrs> {
     pub enable_udp: bool,
     pub allow_nets: Vec<String>,
     pub max_connections: i64,
+    pub epoll_tcp: bool,
 }

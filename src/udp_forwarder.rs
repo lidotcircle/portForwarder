@@ -58,7 +58,12 @@ impl UdpForwarder {
 
     pub fn listen(self: &UdpForwarder) -> Result<(), Box<dyn Error>> {
         let mut poll = Poll::new()?;
-        let mut events = Events::with_capacity(128);
+        let capacity = if let Some(mx) = self.max_connections {
+            std::cmp::min(mx as usize, 1024)
+        } else {
+            1024
+        };
+        let mut events = Events::with_capacity(capacity);
         let t1 = Token(0);
         let mut tx = Token(t1.0);
         let mut addr2token = HashMap::new();

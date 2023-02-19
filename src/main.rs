@@ -2,6 +2,7 @@
 
 mod tcp_forwarder;
 mod udp_forwarder;
+mod tcp_forwarder_epoll;
 mod tcp_udp_forwarder;
 mod utils;
 mod address_matcher;
@@ -22,6 +23,7 @@ fn usage() {
 
     -t    disable tcp
     -u    disable udp
+    -p    epoll tcp forwarder
     -w    network whitelist, eg. 127.0.0.1/24
     -m    max connections
     -c    config file (a yaml file)
@@ -35,6 +37,7 @@ fn print_example_of_config_file() {
   - local: <bind-address/0.0.0.0:1234>
     remote: <remote-address/127.0.0.1:2233>
     enable_tcp: true # default is true
+    epoll_tcp: false # default is false
     enable_udp: true # default is true
     max_connections: 10000 # optional
     allow_nets: # optional
@@ -63,6 +66,7 @@ impl ForwardSessionConfig<String> {
         let enable_udp = yaml["enable_udp"].as_bool().unwrap_or(true);
         let allow_nets_opt = yaml["allow_nets"].as_vec();
         let mut allow_nets = vec!();
+        let epoll_tcp = yaml["epoll_tcp"].as_bool().unwrap_or(false);
 
         if let Some(nets) = allow_nets_opt {
             for _net in nets {
@@ -79,7 +83,7 @@ impl ForwardSessionConfig<String> {
                 -1
             };
 
-        Ok(Self {local, remote, enable_tcp, enable_udp, allow_nets, max_connections})
+        Ok(Self {local, remote, enable_tcp, enable_udp, allow_nets, max_connections, epoll_tcp})
     }
 }
 
@@ -89,6 +93,7 @@ fn main() {
     let mut bind_addr = None;
     let mut forward_addr = None;
     let mut enable_tcp = true;
+    let mut epoll_tcp = false;
     let mut enable_udp = true;
     let mut max_connections = -1;
     let mut args: Vec<String> = std::env::args().collect();
@@ -115,6 +120,9 @@ fn main() {
             }
             "-t" => {
                 enable_tcp= false;
+            }
+            "-p" => {
+                epoll_tcp = true;
             }
             "-e" => {
                 print_example_of_config_file();
@@ -214,6 +222,7 @@ fn main() {
                 enable_udp,
                 allow_nets: whitelist,
                 max_connections,
+                epoll_tcp,
             }
         );
     }
