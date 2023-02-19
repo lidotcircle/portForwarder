@@ -12,6 +12,7 @@ use log::info;
 
 use crate::utils;
 use crate::address_matcher::IpAddrMatcher;
+use crate::forward_config::ForwardSessionConfig;
 
 use mio::{ Events, Poll, Token, Interest };
 use mio::net::UdpSocket;
@@ -23,6 +24,7 @@ pub struct UdpForwarder {
     dstAddr: SocketAddr,
     close: Arc<AtomicBool>,
     allowed_nets: IpAddrMatcher,
+    max_connections: Option<u64>,
 }
 
 fn next(token: &mut Token) -> Token {
@@ -41,15 +43,16 @@ fn reset_readable_writable(poll: &mut Poll, source: &mut UdpSocket, token: &Toke
 }
 
 impl UdpForwarder {
-    pub fn from<T: ToSocketAddrs>(bind_addr: T, dst_addr: T, allowed: &Vec<String>) -> Result<UdpForwarder, Box<dyn Error>> {
-        let baddr = utils::toSockAddr(&bind_addr);
-        let daddr = utils::toSockAddr(&dst_addr);
+    pub fn from<T: ToSocketAddrs>(config: &ForwardSessionConfig<T>) -> Result<UdpForwarder, Box<dyn Error>> {
+        let baddr = utils::toSockAddr(&config.local);
+        let daddr = utils::toSockAddr(&config.remote);
 
         Ok(UdpForwarder {
             bindAddr: baddr,
             dstAddr: daddr,
             close: Arc::from(AtomicBool::from(false)),
-            allowed_nets: IpAddrMatcher::from(&allowed),
+            allowed_nets: IpAddrMatcher::from(&config.allow_nets),
+            max_connections: if config.max_connections >= 0 { Some(config.max_connections as u64) } else { None }
         })
     }
 
@@ -115,6 +118,13 @@ impl UdpForwarder {
                                         }
 
                                         if addr2token.get(&end).is_none() {
+                                            if let Some(mx) = self.max_connections {
+                                                if addr2token.len() as u64 >= mx {
+                                                    info!("drop UDP package from {} because quota is meeted", end.ip());
+                                                    continue;
+                                                }
+                                            }
+
                                             let new_socket = UdpSocket::bind("0.0.0.0:0".parse()?)?;
                                             let t = next(&mut tx);
                                             addr2token.insert(end, t);

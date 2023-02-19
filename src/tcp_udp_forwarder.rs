@@ -1,5 +1,6 @@
 use crate::tcp_forwarder::TcpForwarder;
 use crate::udp_forwarder::UdpForwarder;
+use crate::forward_config::ForwardSessionConfig;
 use std::net::ToSocketAddrs;
 use std::error::Error;
 use std::result::Result;
@@ -12,24 +13,25 @@ pub struct TcpUdpForwarder {
 }
 
 impl TcpUdpForwarder {
-    pub fn from<T: ToSocketAddrs>(bind_addr: &T, connect_addr: &T, enable_udp: bool, enable_tcp: bool, allowed_nets: &Vec<String>)
-        -> Result<TcpUdpForwarder, Box<dyn Error>> {
-            assert!(enable_tcp || enable_udp);
+    pub fn from<T>(config: &ForwardSessionConfig<T>)
+        -> Result<TcpUdpForwarder, Box<dyn Error>> where T: ToSocketAddrs
+    {
+        assert!(config.enable_tcp || config.enable_udp);
 
-            let mut tcpi = None;
-            let mut udpi = None;
-            if enable_tcp {
-                tcpi = Some(TcpForwarder::from(bind_addr,connect_addr,&allowed_nets)?);
-            }
-            if enable_udp {
-                udpi = Some(UdpForwarder::from(bind_addr, connect_addr,&allowed_nets)?);
-            }
-
-            Ok(TcpUdpForwarder {
-                tcp: Arc::from(tcpi),
-                udp: Arc::from(udpi)
-            })
+        let mut tcpi = None;
+        let mut udpi = None;
+        if config.enable_tcp {
+            tcpi = Some(TcpForwarder::from(&config)?);
         }
+        if config.enable_udp {
+            udpi = Some(UdpForwarder::from(&config)?);
+        }
+
+        Ok(TcpUdpForwarder {
+            tcp: Arc::from(tcpi),
+            udp: Arc::from(udpi)
+        })
+    }
 
     pub fn listen(&self) {
         let mut tt = None;

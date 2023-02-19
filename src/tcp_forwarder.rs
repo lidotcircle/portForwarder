@@ -14,6 +14,7 @@ use log::debug;
 use crate::utils::ArcRel;
 use crate::utils;
 use crate::address_matcher::IpAddrMatcher;
+use crate::forward_config::ForwardSessionConfig;
 
 struct ConnectionStat {
     peer_addr: SocketAddr,
@@ -31,8 +32,9 @@ impl ConnectionStat {
 pub struct TcpForwarder {
     tcpFD: Arc<Mutex<TcpListener>>,
     dstAddr: SocketAddr,
-    connections: Arc<Mutex<HashMap<i32,ConnectionStat>>>,
+    connections: Arc<Mutex<HashMap<u64,ConnectionStat>>>,
     allowed_nets: IpAddrMatcher,
+    max_connection: Option<u64>,
 }
 
 /** assume read size equals 0 means eof */
@@ -59,7 +61,7 @@ fn try_tcp_forward_one_direction(src: &mut TcpStream, dst: &mut TcpStream, buf: 
     }
 }
 
-fn tcp_forward(e1: &mut TcpStream, dst: SocketAddr, connections: Arc<Mutex<HashMap<i32,ConnectionStat>>>, cid: i32) -> io::Result<()> {
+fn tcp_forward(e1: &mut TcpStream, dst: SocketAddr, connections: Arc<Mutex<HashMap<u64,ConnectionStat>>>, cid: u64) -> io::Result<()> {
     let mut e2 = TcpStream::connect(dst)?;
     e1.set_read_timeout(Some(time::Duration::from_millis(100)))?;
     e2.set_read_timeout(Some(time::Duration::from_millis(100)))?;
@@ -115,15 +117,16 @@ fn tcp_forward(e1: &mut TcpStream, dst: SocketAddr, connections: Arc<Mutex<HashM
 }
 
 impl TcpForwarder {
-    pub fn from<T: ToSocketAddrs>(bind_addr: T, dst_addr: T, nets: &Vec<String>) -> io::Result<TcpForwarder> {
-        let ts = TcpListener::bind(&bind_addr)?;
+    pub fn from<T: ToSocketAddrs>(config: &ForwardSessionConfig<T>) -> io::Result<TcpForwarder> {
+        let ts = TcpListener::bind(&config.local)?;
         ts.set_nonblocking(true)?;
 
         Ok(Self {
             tcpFD: Arc::new(Mutex::new(ts)),
-            dstAddr: utils::toSockAddr(&dst_addr),
+            dstAddr: utils::toSockAddr(&config.remote),
             connections: Arc::new(Mutex::new(HashMap::new())),
-            allowed_nets: IpAddrMatcher::from(nets),
+            allowed_nets: IpAddrMatcher::from(&config.allow_nets),
+            max_connection: if config.max_connections >= 0 { Some(config.max_connections as u64) } else { None },
         })
     }
 
@@ -137,6 +140,15 @@ impl TcpForwarder {
             match inc {
                 Ok(mut stream) => {
                     let peer_addr = stream.peer_addr().unwrap();
+                    if let Some(mx) = self.max_connection {
+                        let len = self.connections.lock().unwrap().len();
+                        if len as u64 >= mx {
+                            info!("drop TCP connection from {} because quota is meeted", peer_addr.ip());
+                            stream.shutdown(Shutdown::Both).unwrap_or(());
+                            continue;
+                        }
+                    }
+
                     if !self.allowed_nets.testipaddr(&peer_addr.ip()) {
                         info!("drop TCP connection from {}", peer_addr.ip());
                         stream.shutdown(Shutdown::Both).unwrap_or(());

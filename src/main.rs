@@ -5,6 +5,8 @@ mod udp_forwarder;
 mod tcp_udp_forwarder;
 mod utils;
 mod address_matcher;
+mod forward_config;
+use forward_config::ForwardSessionConfig;
 use tcp_udp_forwarder::*;
 use regex::Regex;
 use std::fs;
@@ -21,6 +23,7 @@ fn usage() {
     -t    disable tcp
     -u    disable udp
     -w    network whitelist, eg. 127.0.0.1/24
+    -m    max connections
     -c    config file (a yaml file)
     -e    show an example of config file
     -h    show help", args[0], args[0]);
@@ -33,24 +36,16 @@ fn print_example_of_config_file() {
     remote: <remote-address/127.0.0.1:2233>
     enable_tcp: true # default is true
     enable_udp: true # default is true
+    max_connections: 10000 # optional
     allow_nets: # optional
       - 127.0.0.0/24");
 }
 
-#[derive(Clone)]
-struct ForwardSessionConfig {
-    local: String,
-    remote: String,
-    enable_tcp: bool,
-    enable_udp: bool,
-    allow_nets: Vec<String>,
-}
-
-impl ForwardSessionConfig {
+impl ForwardSessionConfig<String> {
     fn run(&self) -> std::thread::JoinHandle<()> {
         let cp = self.clone();
         std::thread::spawn(move || {
-            let forwarder = TcpUdpForwarder::from(&cp.local, &cp.remote, cp.enable_udp, cp.enable_tcp, &cp.allow_nets).unwrap();
+            let forwarder = TcpUdpForwarder::from(&cp).unwrap();
             forwarder.listen();
         })
    }
@@ -77,7 +72,14 @@ impl ForwardSessionConfig {
             }
         }
 
-        Ok(Self {local, remote, enable_tcp, enable_udp, allow_nets})
+        let max_connections =
+            if let Some(mc) = yaml["max_connections"].as_i64() {
+                mc
+            } else {
+                -1
+            };
+
+        Ok(Self {local, remote, enable_tcp, enable_udp, allow_nets, max_connections})
     }
 }
 
@@ -88,6 +90,7 @@ fn main() {
     let mut forward_addr = None;
     let mut enable_tcp = true;
     let mut enable_udp = true;
+    let mut max_connections = -1;
     let mut args: Vec<String> = std::env::args().collect();
     let mut config_file: Option<String> = None;
     let mut whitelist: Vec<String> = vec![];
@@ -120,6 +123,15 @@ fn main() {
             "-w" => {
                 if i + 1 < args.len() {
                     whitelist = args[i+1].split(",").map(|s| String::from(s)).collect();
+                    skipnext = true;
+                } else {
+                    usage();
+                    std::process::exit(1);
+                }
+            },
+            "-m" => {
+                if i + 1 < args.len() {
+                    max_connections = args[i+1].parse().unwrap();
                     skipnext = true;
                 } else {
                     usage();
@@ -201,6 +213,7 @@ fn main() {
                 enable_tcp,
                 enable_udp,
                 allow_nets: whitelist,
+                max_connections,
             }
         );
     }
