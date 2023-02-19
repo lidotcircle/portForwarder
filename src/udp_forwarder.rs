@@ -8,8 +8,10 @@ use std::time;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use log::info;
 
 use crate::utils;
+use crate::address_matcher::IpAddrMatcher;
 
 use mio::{ Events, Poll, Token, Interest };
 use mio::net::UdpSocket;
@@ -20,6 +22,7 @@ pub struct UdpForwarder {
     bindAddr: SocketAddr,
     dstAddr: SocketAddr,
     close: Arc<AtomicBool>,
+    allowed_nets: IpAddrMatcher,
 }
 
 fn next(token: &mut Token) -> Token {
@@ -38,14 +41,15 @@ fn reset_readable_writable(poll: &mut Poll, source: &mut UdpSocket, token: &Toke
 }
 
 impl UdpForwarder {
-    pub fn from<T: ToSocketAddrs>(bind_addr: T, dst_addr: T) -> Result<UdpForwarder, Box<dyn Error>> {
+    pub fn from<T: ToSocketAddrs>(bind_addr: T, dst_addr: T, allowed: &Vec<String>) -> Result<UdpForwarder, Box<dyn Error>> {
         let baddr = utils::toSockAddr(&bind_addr);
         let daddr = utils::toSockAddr(&dst_addr);
 
         Ok(UdpForwarder {
             bindAddr: baddr,
             dstAddr: daddr,
-            close: Arc::from(AtomicBool::from(false))
+            close: Arc::from(AtomicBool::from(false)),
+            allowed_nets: IpAddrMatcher::from(&allowed),
         })
     }
 
@@ -105,6 +109,11 @@ impl UdpForwarder {
                             while cont {
                                 match udpfd.recv_from(&mut read_buf) {
                                     Ok((size, end)) => {
+                                        if !self.allowed_nets.testipaddr(&end.ip()) {
+                                            info!("drop UDP package from {}", end.ip());
+                                            continue;
+                                        }
+
                                         if addr2token.get(&end).is_none() {
                                             let new_socket = UdpSocket::bind("0.0.0.0:0".parse()?)?;
                                             let t = next(&mut tx);

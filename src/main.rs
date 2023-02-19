@@ -4,6 +4,7 @@ mod tcp_forwarder;
 mod udp_forwarder;
 mod tcp_udp_forwarder;
 mod utils;
+mod address_matcher;
 use tcp_udp_forwarder::*;
 use regex::Regex;
 use std::fs;
@@ -19,6 +20,7 @@ fn usage() {
 
     -t    disable tcp
     -u    disable udp
+    -w    network whitelist, eg. 127.0.0.1/24
     -c    config file (a yaml file)
     -e    show an example of config file
     -h    show help", args[0], args[0]);
@@ -31,7 +33,7 @@ fn print_example_of_config_file() {
     remote: <remote-address/127.0.0.1:2233>
     enable_tcp: true # default is true
     enable_udp: true # default is true
-    allow_nets:
+    allow_nets: # optional
       - 127.0.0.0/24");
 }
 
@@ -48,7 +50,7 @@ impl ForwardSessionConfig {
     fn run(&self) -> std::thread::JoinHandle<()> {
         let cp = self.clone();
         std::thread::spawn(move || {
-            let forwarder = TcpUdpForwarder::from(&cp.local, &cp.remote, cp.enable_udp, cp.enable_tcp).unwrap();
+            let forwarder = TcpUdpForwarder::from(&cp.local, &cp.remote, cp.enable_udp, cp.enable_tcp, &cp.allow_nets).unwrap();
             forwarder.listen();
         })
    }
@@ -65,10 +67,13 @@ impl ForwardSessionConfig {
         let enable_tcp = yaml["enable_tcp"].as_bool().unwrap_or(true);
         let enable_udp = yaml["enable_udp"].as_bool().unwrap_or(true);
         let allow_nets_opt = yaml["allow_nets"].as_vec();
-        let allow_nets = vec!();
+        let mut allow_nets = vec!();
 
         if let Some(nets) = allow_nets_opt {
-            for net in nets {
+            for _net in nets {
+                if let Some(_str) = _net.as_str() {
+                    allow_nets.push(String::from(_str));
+                }
             }
         }
 
@@ -85,10 +90,17 @@ fn main() {
     let mut enable_udp = true;
     let mut args: Vec<String> = std::env::args().collect();
     let mut config_file: Option<String> = None;
+    let mut whitelist: Vec<String> = vec![];
     args.remove(0);
     let valid_ipv4_port = Regex::new(
         r"^(([0-9]{1,3}.){3}[0-9]{1,3}|0-9]{1}|(([0-9]{1}[a-zA-Z]{1})|([a-zA-Z0-9][a-zA-Z0-9-_]{1,61}[a-zA-Z0-9]))\.([a-zA-Z]{2,6}|[a-zA-Z0-9-]{2,30}\.[a-zA-Z]{2,3})|([a-f0-9:]+:+)+[a-f0-9]+|::|localhost):[0-9]{1,5}$").unwrap();
+    let mut skipnext = false;
     for i in 0..args.len() {
+        if skipnext {
+            skipnext = false;
+            continue;
+        }
+
         let s = args[i].as_str();
         match s {
             "-h" => {
@@ -105,6 +117,15 @@ fn main() {
                 print_example_of_config_file();
                 std::process::exit(0);
             }
+            "-w" => {
+                if i + 1 < args.len() {
+                    whitelist = args[i+1].split(",").map(|s| String::from(s)).collect();
+                    skipnext = true;
+                } else {
+                    usage();
+                    std::process::exit(1);
+                }
+            },
             "-c" => {
                 if i + 1 < args.len() {
                     config_file = Some(args[i+1].clone());
@@ -178,7 +199,8 @@ fn main() {
                 local: bind_addr.unwrap(),
                 remote: forward_addr.unwrap(),
                 enable_tcp,
-                enable_udp
+                enable_udp,
+                allow_nets: whitelist,
             }
         );
     }

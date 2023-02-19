@@ -12,17 +12,17 @@ pub struct TcpUdpForwarder {
 }
 
 impl TcpUdpForwarder {
-    pub fn from<T: ToSocketAddrs>(bind_addr: &T, connect_addr: &T, enable_udp: bool, enable_tcp: bool)
+    pub fn from<T: ToSocketAddrs>(bind_addr: &T, connect_addr: &T, enable_udp: bool, enable_tcp: bool, allowed_nets: &Vec<String>)
         -> Result<TcpUdpForwarder, Box<dyn Error>> {
             assert!(enable_tcp || enable_udp);
 
             let mut tcpi = None;
             let mut udpi = None;
             if enable_tcp {
-                tcpi = Some(TcpForwarder::from(bind_addr,connect_addr)?);
+                tcpi = Some(TcpForwarder::from(bind_addr,connect_addr,&allowed_nets)?);
             }
             if enable_udp {
-                udpi = Some(UdpForwarder::from(bind_addr, connect_addr)?);
+                udpi = Some(UdpForwarder::from(bind_addr, connect_addr,&allowed_nets)?);
             }
 
             Ok(TcpUdpForwarder {

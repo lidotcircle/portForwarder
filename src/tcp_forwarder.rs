@@ -13,6 +13,7 @@ use log::debug;
 
 use crate::utils::ArcRel;
 use crate::utils;
+use crate::address_matcher::IpAddrMatcher;
 
 struct ConnectionStat {
     peer_addr: SocketAddr,
@@ -31,6 +32,7 @@ pub struct TcpForwarder {
     tcpFD: Arc<Mutex<TcpListener>>,
     dstAddr: SocketAddr,
     connections: Arc<Mutex<HashMap<i32,ConnectionStat>>>,
+    allowed_nets: IpAddrMatcher,
 }
 
 /** assume read size equals 0 means eof */
@@ -67,7 +69,7 @@ fn tcp_forward(e1: &mut TcpStream, dst: SocketAddr, connections: Arc<Mutex<HashM
 
     let a1 = {
         let locked_connections = connections.lock().unwrap();
-        let stat = &locked_connections[&cid];
+        let stat = &locked_connections[&cid]; // FIXME no entry found
         info!("forward connection from {} to {}", stat.get_peeraddr(), dst);
         stat.stop.clone()
     };
@@ -105,15 +107,15 @@ fn tcp_forward(e1: &mut TcpStream, dst: SocketAddr, connections: Arc<Mutex<HashM
     {
         let stat = &locked_connections[&cid];
         info!("close connection from {} to {}", stat.get_peeraddr(), dst);
-        debug!("number of connections {}", locked_connections.len());
     }
     locked_connections.remove(&cid);
+    debug!("AFTER CLOSE: number of connections {}", locked_connections.len());
 
     Ok(())
 }
 
 impl TcpForwarder {
-    pub fn from<T: ToSocketAddrs>(bind_addr: T, dst_addr: T) -> io::Result<TcpForwarder> {
+    pub fn from<T: ToSocketAddrs>(bind_addr: T, dst_addr: T, nets: &Vec<String>) -> io::Result<TcpForwarder> {
         let ts = TcpListener::bind(&bind_addr)?;
         ts.set_nonblocking(true)?;
 
@@ -121,6 +123,7 @@ impl TcpForwarder {
             tcpFD: Arc::new(Mutex::new(ts)),
             dstAddr: utils::toSockAddr(&dst_addr),
             connections: Arc::new(Mutex::new(HashMap::new())),
+            allowed_nets: IpAddrMatcher::from(nets),
         })
     }
 
@@ -133,14 +136,20 @@ impl TcpForwarder {
         for inc in fd.incoming() {
             match inc {
                 Ok(mut stream) => {
+                    let peer_addr = stream.peer_addr().unwrap();
+                    if !self.allowed_nets.testipaddr(&peer_addr.ip()) {
+                        info!("drop TCP connection from {}", peer_addr.ip());
+                        stream.shutdown(Shutdown::Both).unwrap_or(());
+                        continue;
+                    }
+
                     let tcp_dst = self.dstAddr.clone();
                     let c2 = cons.clone();
-                    let peer_addr = stream.peer_addr().unwrap();
                     let thread_handle = std::thread::spawn(move || tcp_forward(&mut stream, tcp_dst, c2, count));
                     let mut cc = cons.lock().unwrap();
                     cc.insert(count, ConnectionStat{ peer_addr, join_handler: Some(thread_handle), stop: Arc::from(AtomicBool::from(false)) });
                     count += 1;
-                    debug!("number of connections: {}", cc.len());
+                    debug!("AFTER NEW CONN: number of connections: {}", cc.len());
                 },
                 Err(err) => {
                     if err.kind() == io::ErrorKind::WouldBlock {
