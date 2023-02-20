@@ -84,7 +84,7 @@ impl TcpForwarderEPoll {
             remote_addr: toSockAddr(&config.remote),
             allowed_nets: IpAddrMatcher::from(&config.allow_nets),
             max_connections: if config.max_connections >= 0 { Some(config.max_connections as u64) } else { None },
-            cache_size: 1024 * 1024 * 2, // TODO
+            cache_size: config.conn_bufsize,
         })
     }
 

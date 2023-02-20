@@ -24,6 +24,8 @@ fn usage() {
     -t    disable tcp
     -u    disable udp
     -d    disable epoll tcp forwarder
+    -s    connection buffer size, default value: 2MB.
+          support UNITs: KB MB
     -w    network whitelist, eg. 127.0.0.1/24
     -m    max connections
     -c    config file (a yaml file)
@@ -39,6 +41,7 @@ fn print_example_of_config_file() {
     enable_tcp: true # default is true
     epoll_tcp: true # default is true
     enable_udp: true # default is true
+    conn_bufsize: 2MB
     max_connections: 10000 # optional
     allow_nets: # optional
       - 127.0.0.0/24");
@@ -67,6 +70,7 @@ impl ForwardSessionConfig<String> {
         let allow_nets_opt = yaml["allow_nets"].as_vec();
         let mut allow_nets = vec!();
         let epoll_tcp = yaml["epoll_tcp"].as_bool().unwrap_or(true);
+        let conn_bufsize = utils::convert_to_bytes(yaml["conn_bufsize"].as_str().unwrap_or("2MB")).unwrap();
 
         if let Some(nets) = allow_nets_opt {
             for _net in nets {
@@ -83,7 +87,7 @@ impl ForwardSessionConfig<String> {
                 -1
             };
 
-        Ok(Self {local, remote, enable_tcp, enable_udp, allow_nets, max_connections, epoll_tcp})
+        Ok(Self {local, remote, enable_tcp, enable_udp, allow_nets, max_connections, epoll_tcp, conn_bufsize})
     }
 }
 
@@ -99,6 +103,7 @@ fn main() {
     let mut args: Vec<String> = std::env::args().collect();
     let mut config_file: Option<String> = None;
     let mut whitelist: Vec<String> = vec![];
+    let mut conn_bufsize = 2 * 1024 * 1024;
     args.remove(0);
     let valid_ipv4_port = Regex::new(
         r"^(([0-9]{1,3}.){3}[0-9]{1,3}|0-9]{1}|(([0-9]{1}[a-zA-Z]{1})|([a-zA-Z0-9][a-zA-Z0-9-_]{1,61}[a-zA-Z0-9]))\.([a-zA-Z]{2,6}|[a-zA-Z0-9-]{2,30}\.[a-zA-Z]{2,3})|([a-f0-9:]+:+)+[a-f0-9]+|::|localhost):[0-9]{1,5}$").unwrap();
@@ -127,6 +132,15 @@ fn main() {
             "-e" => {
                 print_example_of_config_file();
                 std::process::exit(0);
+            }
+            "-s" => {
+                if i + 1 < args.len() {
+                    conn_bufsize = utils::convert_to_bytes(args[i+1].as_str()).unwrap();
+                    skipnext = true;
+                } else {
+                    usage();
+                    std::process::exit(1);
+                }
             }
             "-w" => {
                 if i + 1 < args.len() {
@@ -223,6 +237,7 @@ fn main() {
                 allow_nets: whitelist,
                 max_connections,
                 epoll_tcp,
+                conn_bufsize,
             }
         );
     }
