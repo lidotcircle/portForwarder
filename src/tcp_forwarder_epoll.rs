@@ -138,7 +138,7 @@ impl TcpForwarderEPoll {
         };
 
         loop {
-            pollIns.poll(&mut events, Some(time::Duration::from_secs(1)))?;
+            pollIns.poll(&mut events, Some(time::Duration::from_secs(1))).unwrap();
             for event in &events {
                 let tk = event.token();
                 if tk == listener_token {
@@ -166,9 +166,9 @@ impl TcpForwarderEPoll {
                                 let nt = nextToken(&mut conn_token);
                                 match TcpStream::connect(self.remote_addr) {
                                     Ok(mut conn) => {
-                                        pollIns.registry().register(&mut stream, t, Interest::READABLE)?;
+                                        pollIns.registry().register(&mut stream, t, Interest::READABLE).unwrap();
                                         token2stream.insert(t, (stream, addr));
-                                        pollIns.registry().register(&mut conn, nt, Interest::READABLE)?;
+                                        pollIns.registry().register(&mut conn, nt, Interest::READABLE).unwrap();
                                         token2connss.insert(nt, conn);
                                         token2stat.insert(t,  Interest::READABLE);
                                         token2stat.insert(nt, Interest::READABLE);
@@ -211,7 +211,7 @@ impl TcpForwarderEPoll {
                         Ok(s) => {
                             if s == 0 {
                                 if token2buffer.get(&tk2).is_none() {
-                                    conn.shutdown(Shutdown::Write)?;
+                                    conn.shutdown(Shutdown::Write).unwrap_or(());
                                     if alreadyShutdown.get(&tk).is_some() {
                                         removeConn(tk,  &mut pollIns, &mut token2stream, &mut token2stat, &mut token2connss, &mut token2buffer, 
                                                    &mut shutdownMe, &mut alreadyShutdown);
@@ -280,7 +280,7 @@ impl TcpForwarderEPoll {
                                     }
                                     clear_writable(&mut pollIns, sss, &tk, &mut token2stat);
                                     if shutdownMe.get(&tk).is_some() {
-                                        sss.shutdown(Shutdown::Write)?;
+                                        sss.shutdown(Shutdown::Write).unwrap_or(());
                                         if alreadyShutdown.get(&tk2).is_some() {
                                             removeConn(tk,  &mut pollIns, &mut token2stream, &mut token2stat, &mut token2connss, &mut token2buffer, 
                                                        &mut shutdownMe, &mut alreadyShutdown);

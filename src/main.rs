@@ -23,7 +23,7 @@ fn usage() {
 
     -t    disable tcp
     -u    disable udp
-    -p    epoll tcp forwarder
+    -d    disable epoll tcp forwarder
     -w    network whitelist, eg. 127.0.0.1/24
     -m    max connections
     -c    config file (a yaml file)
@@ -37,7 +37,7 @@ fn print_example_of_config_file() {
   - local: <bind-address/0.0.0.0:1234>
     remote: <remote-address/127.0.0.1:2233>
     enable_tcp: true # default is true
-    epoll_tcp: false # default is false
+    epoll_tcp: true # default is true
     enable_udp: true # default is true
     max_connections: 10000 # optional
     allow_nets: # optional
@@ -66,7 +66,7 @@ impl ForwardSessionConfig<String> {
         let enable_udp = yaml["enable_udp"].as_bool().unwrap_or(true);
         let allow_nets_opt = yaml["allow_nets"].as_vec();
         let mut allow_nets = vec!();
-        let epoll_tcp = yaml["epoll_tcp"].as_bool().unwrap_or(false);
+        let epoll_tcp = yaml["epoll_tcp"].as_bool().unwrap_or(true);
 
         if let Some(nets) = allow_nets_opt {
             for _net in nets {
@@ -93,7 +93,7 @@ fn main() {
     let mut bind_addr = None;
     let mut forward_addr = None;
     let mut enable_tcp = true;
-    let mut epoll_tcp = false;
+    let mut epoll_tcp = true;
     let mut enable_udp = true;
     let mut max_connections = -1;
     let mut args: Vec<String> = std::env::args().collect();
@@ -121,8 +121,8 @@ fn main() {
             "-t" => {
                 enable_tcp= false;
             }
-            "-p" => {
-                epoll_tcp = true;
+            "-d" => {
+                epoll_tcp = false;
             }
             "-e" => {
                 print_example_of_config_file();
