@@ -1,14 +1,8 @@
 #![allow(non_snake_case)]
+extern crate portforwarder;
 
-mod tcp_forwarder;
-mod udp_forwarder;
-mod tcp_forwarder_epoll;
-mod tcp_udp_forwarder;
-mod utils;
-mod address_matcher;
-mod forward_config;
-use forward_config::ForwardSessionConfig;
-use tcp_udp_forwarder::*;
+use portforwarder::tcp_udp_forwarder::TcpUdpForwarder;
+use portforwarder::forward_config::ForwardSessionConfig;
 use regex::Regex;
 use std::fs;
 use yaml_rust::{YamlLoader, Yaml};
@@ -47,7 +41,39 @@ fn print_example_of_config_file() {
       - 127.0.0.0/24");
 }
 
-impl ForwardSessionConfig<String> {
+pub fn convert_to_bytes(input: &str) -> Option<usize> {
+    let units = vec!["B", "KB", "MB", "GB", "TB"];
+    let mut num_str = String::new();
+    let mut unit_str = String::new();
+
+    for c in input.chars() {
+        if c.is_digit(10) {
+            num_str.push(c);
+        } else {
+            unit_str.push(c);
+        }
+    }
+
+    let num = match num_str.parse::<usize>() {
+        Ok(n) => n,
+        Err(_) => return None,
+    };
+
+    let unit_index = units.iter().position(|&u| u == unit_str.trim().to_uppercase());
+
+    if let Some(index) = unit_index {
+        Some(num * (1024 as usize).pow(index as u32))
+    } else {
+        None
+    }
+}
+
+pub trait FromYaml: Sized {
+    fn run(&self) -> std::thread::JoinHandle<()>;
+    fn fromYaml(yaml: &Yaml) -> Result<Self,&'static str>;
+}
+
+impl FromYaml for ForwardSessionConfig<String> {
     fn run(&self) -> std::thread::JoinHandle<()> {
         let cp = self.clone();
         std::thread::spawn(move || {
@@ -56,7 +82,7 @@ impl ForwardSessionConfig<String> {
         })
    }
 
-    fn from(yaml: &Yaml) -> Result<Self,&'static str> {
+    fn fromYaml(yaml: &Yaml) -> Result<Self,&'static str> {
         let local = match yaml["local"].as_str() {
             Some(s) => String::from(s),
             None => return Err("missing local"),
@@ -70,7 +96,7 @@ impl ForwardSessionConfig<String> {
         let allow_nets_opt = yaml["allow_nets"].as_vec();
         let mut allow_nets = vec!();
         let epoll_tcp = yaml["epoll_tcp"].as_bool().unwrap_or(true);
-        let conn_bufsize = utils::convert_to_bytes(yaml["conn_bufsize"].as_str().unwrap_or("2MB")).unwrap();
+        let conn_bufsize = convert_to_bytes(yaml["conn_bufsize"].as_str().unwrap_or("2MB")).unwrap();
 
         if let Some(nets) = allow_nets_opt {
             for _net in nets {
@@ -135,7 +161,7 @@ fn main() {
             }
             "-s" => {
                 if i + 1 < args.len() {
-                    conn_bufsize = utils::convert_to_bytes(args[i+1].as_str()).unwrap();
+                    conn_bufsize = convert_to_bytes(args[i+1].as_str()).unwrap();
                     skipnext = true;
                 } else {
                     usage();
@@ -206,7 +232,7 @@ fn main() {
 
                 let fflist = forwarders.as_vec().unwrap();
                 for ff in fflist {
-                    match ForwardSessionConfig::from(ff) {
+                    match ForwardSessionConfig::fromYaml(ff) {
                         Ok(c) => forwarder_configs.push(c),
                         Err(e) => {
                             println!("invalid config file: {e}\n{:?}", ff);
