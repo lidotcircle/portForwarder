@@ -16,6 +16,7 @@ path = "src/bin/main.rs"
 
 [dependencies]
 env_logger = "0.10.0"
+hex = "0.4.3"
 ipnet = "2.7.1"
 log = "0.4.17"
 mio = { version = "0.8", features = ["os-poll", "net"] }

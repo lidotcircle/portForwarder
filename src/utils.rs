@@ -6,13 +6,7 @@ use std::net::{SocketAddr, ToSocketAddrs};
 pub struct ArcRel<'a> {
     v: &'a Arc<AtomicBool>
 }
-impl<'a> ArcRel<'a> {
-    pub fn from(arc: &Arc<AtomicBool>) -> ArcRel {
-        ArcRel {
-            v: arc
-        }
-    }
-}
+
 impl<'a> Drop for ArcRel<'a> {
     fn drop(self: &mut ArcRel<'a>) {
         self.v.store(true, Ordering::SeqCst);

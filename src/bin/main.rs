@@ -17,7 +17,6 @@ fn usage() {
 
     -t    disable tcp
     -u    disable udp
-    -d    disable epoll tcp forwarder
     -s    connection buffer size, default value: 2MB.
           support UNITs: KB MB
     -w    network whitelist, eg. 127.0.0.1/24
@@ -33,7 +32,6 @@ fn print_example_of_config_file() {
   - local: <bind-address/0.0.0.0:1234>
     remote: <remote-address/127.0.0.1:2233>
     enable_tcp: true # default is true
-    epoll_tcp: true # default is true
     enable_udp: true # default is true
     conn_bufsize: 2MB
     max_connections: 10000 # optional
@@ -95,7 +93,6 @@ impl FromYaml for ForwardSessionConfig<String> {
         let enable_udp = yaml["enable_udp"].as_bool().unwrap_or(true);
         let allow_nets_opt = yaml["allow_nets"].as_vec();
         let mut allow_nets = vec!();
-        let epoll_tcp = yaml["epoll_tcp"].as_bool().unwrap_or(true);
         let conn_bufsize = convert_to_bytes(yaml["conn_bufsize"].as_str().unwrap_or("2MB")).unwrap();
 
         if let Some(nets) = allow_nets_opt {
@@ -113,7 +110,7 @@ impl FromYaml for ForwardSessionConfig<String> {
                 -1
             };
 
-        Ok(Self {local, remote, enable_tcp, enable_udp, allow_nets, max_connections, epoll_tcp, conn_bufsize})
+        Ok(Self {local, remote, enable_tcp, enable_udp, allow_nets, max_connections, conn_bufsize})
     }
 }
 
@@ -123,7 +120,6 @@ fn main() {
     let mut bind_addr = None;
     let mut forward_addr = None;
     let mut enable_tcp = true;
-    let mut epoll_tcp = true;
     let mut enable_udp = true;
     let mut max_connections = -1;
     let mut args: Vec<String> = std::env::args().collect();
@@ -151,9 +147,6 @@ fn main() {
             }
             "-t" => {
                 enable_tcp= false;
-            }
-            "-d" => {
-                epoll_tcp = false;
             }
             "-e" => {
                 print_example_of_config_file();
@@ -262,7 +255,6 @@ fn main() {
                 enable_udp,
                 allow_nets: whitelist,
                 max_connections,
-                epoll_tcp,
                 conn_bufsize,
             }
         );

@@ -10,5 +10,4 @@ pub struct ForwardSessionConfig<T: ToSocketAddrs> {
     pub conn_bufsize: usize,
     pub allow_nets: Vec<String>,
     pub max_connections: i64,
-    pub epoll_tcp: bool,
 }
