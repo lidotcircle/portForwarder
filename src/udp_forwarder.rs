@@ -3,8 +3,10 @@ extern crate mio;
 use std::error::Error;
 use std::net::{ToSocketAddrs, SocketAddr};
 use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::io;
 use std::time;
+use std::cmp;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -66,34 +68,42 @@ impl UdpForwarder {
         let mut events = Events::with_capacity(capacity);
         let t1 = Token(0);
         let mut tx = Token(t1.0);
-        let mut addr2token = HashMap::new();
-        let mut token2addr = HashMap::new();
-        let mut token2socket = HashMap::new();
-        let mut tokenWaitWrite = HashMap::new();
-        let mut token2life: HashMap<Token, time::Instant> = HashMap::new();
-        let mut writeBackQueue: Vec<(SocketAddr, Vec<u8>)> = Vec::new();
+        let mut addr2token: HashMap<SocketAddr, Token>       = HashMap::new();
+        let mut token2addr: HashMap<Token, SocketAddr>       = HashMap::new();
+        let mut token2socket: HashMap<Token, UdpSocket>      = HashMap::new();
+        let mut tokenWaitWrite: HashMap<Token, Vec<Vec<u8>>> = HashMap::new();
+        let mut life2token: BTreeMap<u128, Token>             = BTreeMap::new();
+        let mut token2life: HashMap<Token, u128>              = HashMap::new();
+        let mut writeBackQueue: Vec<(SocketAddr, Vec<u8>)>   = Vec::new();
 
         let mut udpfd = UdpSocket::bind(self.bindAddr)?;
         poll.registry().
             register(&mut udpfd, t1, Interest::READABLE)?;
 
-        let mut outConnections = vec![];
         let mut read_buf = vec![0;1<<16];
+        let mut waiting_to_close: Vec<Token> = vec![];
+        let lifespan_us = 3 * 60 * 1000 * 1000;
         loop {
-            for k in token2life.keys() {
-                if token2life.get(k).unwrap().elapsed() > time::Duration::from_secs(3 * 60) {
-                    outConnections.push(*k);
-                }
+            // now as KEY of BTreeMap should be unique for every connections
+            let mut now = time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros();
+            let lastkv = life2token.iter().next();
+            if lastkv.is_some() {
+                now = cmp::max(now, *lastkv.unwrap().0);
             }
-            while !outConnections.is_empty() {
-                let t = outConnections.remove(0);
+            for outdate in life2token.range(0..now - lifespan_us) {
+                waiting_to_close.push(outdate.1.clone());
+            }
+            for t in &waiting_to_close {
+                let k = token2life.remove(&t).unwrap();
+                life2token.remove(&k).unwrap();
                 let addr = *token2addr.get(&t).unwrap();
                 addr2token.remove(&addr);
                 token2addr.remove(&t);
                 token2socket.remove(&t).unwrap();
                 tokenWaitWrite.remove(&t);
-                token2life.remove(&t);
             }
+            waiting_to_close.clear();
+
             let rs = poll.poll(&mut events, 
                                Some(time::Duration::from_millis(1000)));
             if self.close.load(Ordering::SeqCst) {
@@ -129,12 +139,16 @@ impl UdpForwarder {
                                                     continue;
                                                 }
                                             }
+                                            info!("create session, new message from {}", end);
 
                                             let new_socket = UdpSocket::bind("0.0.0.0:0".parse()?)?;
                                             let t = next(&mut tx);
                                             addr2token.insert(end, t);
                                             token2addr.insert(t, end);
                                             token2socket.insert(t, new_socket);
+                                            token2life.insert(t, now);
+                                            life2token.insert(now, t);
+                                            now += 1;
 
                                             poll.registry().
                                                 register(token2socket.get_mut(&t).unwrap(), t, Interest::READABLE)?;
@@ -157,7 +171,8 @@ impl UdpForwarder {
                                     }
                                 }
                             }
-                        } else if event.is_writable() {
+                        }
+                        if event.is_writable() {
                             assert!(writeBackQueue.len() > 0);
                             let mut cont = true;
                             while writeBackQueue.len() > 0 && cont {
@@ -179,54 +194,69 @@ impl UdpForwarder {
                     token => {
                         let sock = token2socket.get_mut(&token).unwrap();
 
-                        if !event.is_error() {
-                            token2life.insert(token, time::Instant::now());
-                        }
-
                         if event.is_readable() {
                             let mut cont = true;
                             while cont {
                                 match sock.recv(&mut read_buf) {
-                                    Ok(size) => {
+                                    Ok(size) if size > 0 => {
                                         let addr = token2addr.get(&token).unwrap().clone();
                                         if writeBackQueue.is_empty() {
                                             reset_readable_writable(&mut poll, &mut udpfd, &t1);
                                         }
                                         writeBackQueue.push((addr, Vec::from(&read_buf[0..size])));
-                                    },
-                                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                                        cont = false;
-                                    },
-                                    Err(_) => {
-                                        cont = false;
-                                        outConnections.push(token)
-                                    }
-                                }
-                            }
-                        } else if event.is_writable() {
-                            let bufs: &mut _ = tokenWaitWrite.get_mut(&token).unwrap();
-                            assert!(bufs.len() > 0);
 
-                            let mut cont = true;
-                            while bufs.len() > 0 && cont {
-                                let buf = bufs.remove(0);
-                                match sock.send_to(&buf, self.dstAddr) {
+                                        let oldLife = token2life.get(&token).unwrap();
+                                        life2token.remove(oldLife);
+                                        token2life.insert(token, now);
+                                        life2token.insert(now, token);
+                                        now += 1;
+                                    },
                                     Ok(_) => {},
                                     Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                                         cont = false;
                                     },
                                     Err(_) => {
                                         cont = false;
-                                        outConnections.push(token);
+                                        waiting_to_close.push(token)
                                     }
                                 }
+                            }
+                        }
+                        if event.is_writable() {
+                            let bufs: &mut _ = tokenWaitWrite.get_mut(&token).unwrap();
+                            assert!(bufs.len() > 0);
+
+                            let mut cont = true;
+                            let mut nwritten = 0;
+                            while bufs.len() > 0 && cont {
+                                let buf = bufs.remove(0);
+                                match sock.send_to(&buf, self.dstAddr) {
+                                    Ok(s) => {
+                                        nwritten += s;
+                                    },
+                                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                                        cont = false;
+                                    },
+                                    Err(_) => {
+                                        cont = false;
+                                        waiting_to_close.push(token);
+                                    }
+                                }
+                            }
+                            if nwritten > 0 {
+                                let oldLife = token2life.get(&token).unwrap();
+                                life2token.remove(oldLife);
+                                token2life.insert(token, now);
+                                life2token.insert(now, token);
+                                now += 1;
                             }
                             if bufs.len() == 0 {
                                 reset_readable(&mut poll,sock,&token);
                                 tokenWaitWrite.remove(&token).unwrap();
                             }
-                        } else if event.is_error() {
-                            outConnections.push(token);
+                        }
+                        if event.is_error() {
+                            waiting_to_close.push(token);
                         }
                     }
                 }
@@ -238,4 +268,3 @@ impl UdpForwarder {
         self.close.store(true, Ordering::SeqCst);
     }
 }
-
