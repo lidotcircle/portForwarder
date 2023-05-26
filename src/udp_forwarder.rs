@@ -22,7 +22,6 @@ use mio::net::UdpSocket;
 
 pub struct UdpForwarder {
     bindAddr: SocketAddr,
-    close: Arc<AtomicBool>,
     plugin: Box<dyn ConnectionPlugin + Send + Sync>,
     max_connections: Option<u64>,
 }
@@ -48,13 +47,12 @@ impl UdpForwarder {
 
         Ok(UdpForwarder {
             bindAddr: baddr,
-            close: Arc::from(AtomicBool::from(false)),
             plugin: Box::new(RegexMultiplexer::from((config.remoteMap.clone(), config.allow_nets.clone()))),
             max_connections: if config.max_connections >= 0 { Some(config.max_connections as u64) } else { None }
         })
     }
 
-    pub fn listen(self: &UdpForwarder) -> Result<(), Box<dyn Error>> {
+    pub fn listen(self: &UdpForwarder, closed: Arc<AtomicBool>) -> Result<(), Box<dyn Error>> {
         let mut poll = Poll::new()?;
         let capacity = if let Some(mx) = self.max_connections {
             std::cmp::min(mx as usize, 1024)
@@ -104,7 +102,7 @@ impl UdpForwarder {
 
             let rs = poll.poll(&mut events, 
                                Some(time::Duration::from_millis(1000)));
-            if self.close.load(Ordering::SeqCst) {
+            if closed.load(Ordering::SeqCst) {
                 return Ok(());
             }
 
@@ -273,9 +271,5 @@ impl UdpForwarder {
                 }
             }
         }
-    }
-
-    pub fn close(self: &UdpForwarder) {
-        self.close.store(true, Ordering::SeqCst);
     }
 }

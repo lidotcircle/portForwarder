@@ -5,6 +5,7 @@ use portforwarder::tcp_udp_forwarder::TcpUdpForwarder;
 use portforwarder::forward_config::ForwardSessionConfig;
 use regex::Regex;
 use std::fs;
+use std::sync::{Arc, Condvar, Mutex};
 use yaml_rust::{YamlLoader, Yaml};
 
 
@@ -79,7 +80,23 @@ impl FromYaml for ForwardSessionConfig<String> {
         let cp = self.clone();
         std::thread::spawn(move || {
             let forwarder = TcpUdpForwarder::from(&cp).unwrap();
-            forwarder.listen();
+            let close_handler = forwarder.listen();
+            let pair = Arc::new((Mutex::new(false), Condvar::new()));
+            let pair2 = Arc::clone(&pair);
+            ctrlc::set_handler(move || {
+                println!("ctrl-c pressed, exiting ...");
+                let (lock, cvar) = &*pair2;
+                let mut close = lock.lock().unwrap();
+                *close = true;
+                cvar.notify_one();
+            }).unwrap();
+
+            let (lock, cvar) = &*pair;
+            let mut closed = lock.lock().unwrap();
+            while !*closed {
+                closed = cvar.wait(closed).unwrap();
+            }
+            close_handler();
         })
    }
 

@@ -15,6 +15,7 @@ path = "src/bin/main.rs"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+ctrlc = "3.3.1"
 env_logger = "0.10.0"
 hex = "0.4.3"
 ipnet = "2.7.1"

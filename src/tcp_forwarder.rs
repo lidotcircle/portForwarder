@@ -1,6 +1,7 @@
 use std::net::{Shutdown, ToSocketAddrs, SocketAddr};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::{Arc, atomic::AtomicBool};
 use std::cell::RefCell;
 use std::io::{Write, Read};
 use std::time;
@@ -88,7 +89,7 @@ impl TcpForwarder {
         })
     }
 
-    pub fn listen(self: &Self) -> std::io::Result<()> {
+    pub fn listen(self: &Self, closed: Arc<AtomicBool>) -> std::io::Result<()> {
         let mut pollIns = Poll::new()?;
         let mut listener = TcpListener::bind(self.local_addr)?;
         let listener_token = Token(0);
@@ -140,6 +141,10 @@ impl TcpForwarder {
         };
 
         loop {
+            if closed.load(std::sync::atomic::Ordering::SeqCst) {
+                return Ok(());
+            }
+
             pollIns.poll(&mut events, Some(time::Duration::from_secs(1))).unwrap();
             for event in &events {
                 let tk = event.token();
