@@ -13,19 +13,17 @@ use std::sync::atomic::Ordering;
 use log::info;
 
 use crate::utils;
-use crate::address_matcher::IpAddrMatcher;
 use crate::forward_config::ForwardSessionConfig;
+use crate::connection_plugin::{ConnectionPlugin, RegexMultiplexer};
 
 use mio::{ Events, Poll, Token, Interest };
 use mio::net::UdpSocket;
 
 
-#[derive(Clone)]
 pub struct UdpForwarder {
     bindAddr: SocketAddr,
-    dstAddr: SocketAddr,
     close: Arc<AtomicBool>,
-    allowed_nets: IpAddrMatcher,
+    plugin: Box<dyn ConnectionPlugin + Send + Sync>,
     max_connections: Option<u64>,
 }
 
@@ -47,13 +45,11 @@ fn reset_readable_writable(poll: &mut Poll, source: &mut UdpSocket, token: &Toke
 impl UdpForwarder {
     pub fn from<T: ToSocketAddrs>(config: &ForwardSessionConfig<T>) -> Result<UdpForwarder, Box<dyn Error>> {
         let baddr = utils::toSockAddr(&config.local);
-        let daddr = utils::toSockAddr(&config.remote);
 
         Ok(UdpForwarder {
             bindAddr: baddr,
-            dstAddr: daddr,
             close: Arc::from(AtomicBool::from(false)),
-            allowed_nets: IpAddrMatcher::from(&config.allow_nets),
+            plugin: Box::new(RegexMultiplexer::from((config.remoteMap.clone(), config.allow_nets.clone()))),
             max_connections: if config.max_connections >= 0 { Some(config.max_connections as u64) } else { None }
         })
     }
@@ -72,8 +68,9 @@ impl UdpForwarder {
         let mut token2addr: HashMap<Token, SocketAddr>       = HashMap::new();
         let mut token2socket: HashMap<Token, UdpSocket>      = HashMap::new();
         let mut tokenWaitWrite: HashMap<Token, Vec<Vec<u8>>> = HashMap::new();
-        let mut life2token: BTreeMap<u128, Token>             = BTreeMap::new();
-        let mut token2life: HashMap<Token, u128>              = HashMap::new();
+        let mut life2token: BTreeMap<u128, Token>            = BTreeMap::new();
+        let mut token2life: HashMap<Token, u128>             = HashMap::new();
+        let mut token2dst: HashMap<Token, SocketAddr>        = HashMap::new();
         let mut writeBackQueue: Vec<(SocketAddr, Vec<u8>)>   = Vec::new();
 
         let mut udpfd = UdpSocket::bind(self.bindAddr)?;
@@ -101,6 +98,7 @@ impl UdpForwarder {
                 token2addr.remove(&t);
                 token2socket.remove(&t).unwrap();
                 tokenWaitWrite.remove(&t);
+                token2dst.remove(&t);
             }
             waiting_to_close.clear();
 
@@ -127,7 +125,7 @@ impl UdpForwarder {
                             while cont {
                                 match udpfd.recv_from(&mut read_buf) {
                                     Ok((size, end)) => {
-                                        if !self.allowed_nets.testipaddr(&end.ip()) {
+                                        if !self.plugin.testipaddr(&end) {
                                             info!("drop UDP package from {}", end.ip());
                                             continue;
                                         }
@@ -230,16 +228,29 @@ impl UdpForwarder {
                             let mut nwritten = 0;
                             while bufs.len() > 0 && cont {
                                 let buf = bufs.remove(0);
-                                match sock.send_to(&buf, self.dstAddr) {
-                                    Ok(s) => {
-                                        nwritten += s;
+                                let dst = if token2dst.contains_key(&token) {
+                                    Some(*token2dst.get(&token).unwrap())
+                                } else {
+                                    self.plugin.decideTarget(&buf, *token2addr.get(&token).unwrap())
+                                };
+                                match dst {
+                                    Some(remote) => {
+                                        match sock.send_to(&buf, remote) {
+                                            Ok(s) => {
+                                                nwritten += s;
+                                            },
+                                            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                                                cont = false;
+                                            },
+                                            Err(_) => {
+                                                cont = false;
+                                                waiting_to_close.push(token);
+                                            }
+                                        }
                                     },
-                                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                                        cont = false;
-                                    },
-                                    Err(_) => {
-                                        cont = false;
+                                    None => {
                                         waiting_to_close.push(token);
+                                        break;
                                     }
                                 }
                             }

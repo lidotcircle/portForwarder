@@ -1,18 +1,19 @@
 use std::net::{Shutdown, ToSocketAddrs, SocketAddr};
 use std::collections::{HashMap, HashSet};
-use std::io::{Read, Write};
+use std::rc::Rc;
+use std::cell::RefCell;
+use std::io::{Write, Read};
 use std::time;
 use log::info;
 use mio::{Interest,Token,Poll,Events};
 use mio::net::{TcpListener, TcpStream};
-use crate::address_matcher::IpAddrMatcher;
 use crate::forward_config::ForwardSessionConfig;
 use crate::utils::toSockAddr;
+use crate::connection_plugin::{ConnectionPlugin,RegexMultiplexer};
 
 pub struct TcpForwarder {
     local_addr: SocketAddr,
-    remote_addr: SocketAddr,
-    allowed_nets: IpAddrMatcher,
+    plugin: Box<dyn ConnectionPlugin + Send + Sync>,
     max_connections: Option<u64>,
     cache_size: usize,
 }
@@ -81,8 +82,7 @@ impl TcpForwarder {
     pub fn from<T: ToSocketAddrs>(config: &ForwardSessionConfig<T>) -> std::io::Result<TcpForwarder> {
         Ok(Self {
             local_addr: toSockAddr(&config.local),
-            remote_addr: toSockAddr(&config.remote),
-            allowed_nets: IpAddrMatcher::from(&config.allow_nets),
+            plugin: Box::new(RegexMultiplexer::from((config.remoteMap.clone(), config.allow_nets.clone()))),
             max_connections: if config.max_connections >= 0 { Some(config.max_connections as u64) } else { None },
             cache_size: config.conn_bufsize,
         })
@@ -103,15 +103,15 @@ impl TcpForwarder {
         let mut events = Events::with_capacity(capacity);
 
         let mut conn_token = Token(1);
-        let mut token2stream: HashMap<Token, (TcpStream, SocketAddr)> = HashMap::new();
-        let mut token2connss: HashMap<Token, TcpStream> = HashMap::new();
+        let mut token2stream: HashMap<Token, (Rc<RefCell<TcpStream>>, SocketAddr)> = HashMap::new();
+        let mut token2connss: HashMap<Token, Rc<RefCell<TcpStream>>> = HashMap::new();
         let mut token2stat   = HashMap::new();
         let mut token2buffer: HashMap<Token, (Vec<_>, usize)> = HashMap::new();
         let mut shutdownMe: HashSet<Token> = HashSet::new();
         let mut alreadyShutdown: HashSet<Token> = HashSet::new();
 
-        let removeConn = |tk: Token, pollIns: &mut Poll, token2stream: &mut HashMap<Token, (TcpStream, SocketAddr)>, 
-                              token2stat: &mut _, token2connss: &mut HashMap<Token, TcpStream>, 
+        let removeConn = |tk: Token, pollIns: &mut Poll, token2stream: &mut HashMap<Token, (Rc<RefCell<TcpStream>>, SocketAddr)>, 
+                              token2stat: &mut _, token2connss: &mut HashMap<Token, Rc<RefCell<TcpStream>>>, 
                               token2buffer: &mut HashMap<Token, (Vec<_>, usize)>, 
                               shutdownMe: &mut HashSet<Token>, alreadyShutdown: &mut HashSet<Token>|
         {
@@ -123,10 +123,12 @@ impl TcpForwarder {
 
             info!("close connection from {}, remaining {}", token2stream.get(&t1).unwrap().1, token2stream.len() -1);
 
-            clear_readable(pollIns, &mut token2stream.get_mut(&t1).unwrap().0, &t1, token2stat);
-            clear_writable(pollIns, &mut token2stream.get_mut(&t1).unwrap().0, &t1, token2stat);
-            clear_readable(pollIns, token2connss.get_mut(&t2).unwrap(), &t2, token2stat);
-            clear_writable(pollIns, token2connss.get_mut(&t2).unwrap(), &t2, token2stat);
+            clear_readable(pollIns, &mut token2stream.get(&t1).unwrap().0.borrow_mut(), &t1, token2stat);
+            clear_writable(pollIns, &mut token2stream.get(&t1).unwrap().0.borrow_mut(), &t1, token2stat);
+            if token2connss.contains_key(&t2) {
+                clear_readable(pollIns, &mut token2connss.get(&t2).unwrap().borrow_mut(), &t2, token2stat);
+                clear_writable(pollIns, &mut token2connss.get(&t2).unwrap().borrow_mut(), &t2, token2stat);
+            }
             token2stream.remove(&t1).unwrap();
             token2connss.remove(&t2).unwrap();
             token2buffer.remove(&t1);
@@ -156,7 +158,7 @@ impl TcpForwarder {
                                     }
                                 }
 
-                                if !self.allowed_nets.testipaddr(&addr.ip()) {
+                                if !self.plugin.testipaddr(&addr) {
                                     info!("drop TCP connection from {}", addr);
                                     stream.shutdown(Shutdown::Both).unwrap_or(());
                                     continue;
@@ -164,19 +166,27 @@ impl TcpForwarder {
 
                                 let t = nextToken(&mut conn_token);
                                 let nt = nextToken(&mut conn_token);
-                                match TcpStream::connect(self.remote_addr) {
-                                    Ok(mut conn) => {
-                                        pollIns.registry().register(&mut stream, t, Interest::READABLE).unwrap();
-                                        token2stream.insert(t, (stream, addr));
-                                        pollIns.registry().register(&mut conn, nt, Interest::READABLE).unwrap();
-                                        token2connss.insert(nt, conn);
-                                        token2stat.insert(t,  Interest::READABLE);
-                                        token2stat.insert(nt, Interest::READABLE);
-                                        info!("accept connection from {} to {}, current connections: {}", addr, self.remote_addr, token2stream.len());
-                                    },
-                                    Err(reason) => {
-                                        info!("close connection from {} because failed to connect remote address {}: {}", addr, self.remote_addr, reason);
+                                let singleRemote = self.plugin.onlySingleTarget();
+                                if singleRemote.is_some() {
+                                    let remote = singleRemote.unwrap();
+                                    match TcpStream::connect(remote) {
+                                        Ok(mut conn) => {
+                                            pollIns.registry().register(&mut stream, t, Interest::READABLE).unwrap();
+                                            token2stream.insert(t, (Rc::new(RefCell::new(stream)), addr));
+                                            pollIns.registry().register(&mut conn, nt, Interest::READABLE).unwrap();
+                                            token2connss.insert(nt, Rc::new(RefCell::new(conn)));
+                                            token2stat.insert(t,  Interest::READABLE);
+                                            token2stat.insert(nt, Interest::READABLE);
+                                            info!("accept connection from {} to {}, current connections: {}", addr, remote, token2stream.len());
+                                        },
+                                        Err(reason) => {
+                                            info!("close connection from {} because failed to connect remote address {}: {}", addr, remote, reason);
+                                        }
                                     }
+                                } else {
+                                    pollIns.registry().register(&mut stream, t, Interest::READABLE).unwrap();
+                                    token2stream.insert(t, (Rc::new(RefCell::new(stream)), addr));
+                                    token2stat.insert(t,  Interest::READABLE);
                                 }
                             },
                             Err(reason) => {
@@ -195,49 +205,91 @@ impl TcpForwarder {
                 }
 
                 let (sss, tk2, conn)  = if tk.0 % 2 == 0 {
-                    let stream = &mut token2stream.get_mut(&tk).unwrap().0;
+                    let stream = token2stream.get_mut(&tk).unwrap().0.clone();
                     let tk2 = Token(tk.0 + 1);
-                    (stream, tk2, token2connss.get_mut(&tk2).unwrap())
+                    let peersock = match token2connss.get(&tk2) {
+                        Some(ss) => Some(ss.clone()),
+                        None => None
+                    };
+                    (stream, tk2, peersock)
                 } else {
-                    let conn = token2connss.get_mut(&tk).unwrap();
+                    let conn = token2connss.get(&tk).unwrap().clone();
                     let tk2 = Token(tk.0 - 1);
-                    let stream = &mut token2stream.get_mut(&tk2).unwrap().0;
-                    (conn, tk2, stream)
+                    let stream = token2stream.get(&tk2).unwrap().0.clone();
+                    (conn, tk2, Some(stream))
                 };
 
                 if event.is_readable() {
                     let mut buf = [0; 1<<16];
-                    match sss.read(&mut buf[..]) {
+                    let sss_mut = &mut sss.borrow_mut();
+                    match sss_mut.read(&mut buf[..]) {
                         Ok(s) => {
                             if s == 0 {
                                 if token2buffer.get(&tk2).is_none() {
-                                    conn.shutdown(Shutdown::Write).unwrap_or(());
-                                    if alreadyShutdown.get(&tk).is_some() {
-                                        removeConn(tk,  &mut pollIns, &mut token2stream, &mut token2stat, &mut token2connss, &mut token2buffer, 
+                                    if conn.is_some() {
+                                        conn.as_ref().unwrap().borrow_mut().shutdown(Shutdown::Write).unwrap_or(());
+                                        if alreadyShutdown.get(&tk).is_some() {
+                                            drop(sss_mut);
+                                            removeConn(tk,  &mut pollIns, &mut token2stream, &mut token2stat, &mut token2connss, &mut token2buffer,
+                                                       &mut shutdownMe, &mut alreadyShutdown);
+                                            continue;
+                                        } else {
+                                            clear_writable(&mut pollIns, &mut conn.as_ref().unwrap().borrow_mut(), &tk2, &mut token2stat);
+                                            alreadyShutdown.insert(tk2);
+                                        }
+                                    } else {
+                                        drop(sss_mut);
+                                        removeConn(tk,  &mut pollIns, &mut token2stream, &mut token2stat, &mut token2connss, &mut token2buffer,
                                                    &mut shutdownMe, &mut alreadyShutdown);
                                         continue;
-                                    } else {
-                                        clear_writable(&mut pollIns, conn, &tk2, &mut token2stat);
-                                        alreadyShutdown.insert(tk2);
+
                                     }
                                 } else {
                                     shutdownMe.insert(tk2);
                                 }
                             } else {
                                 let vbuf = Vec::from(&buf[0..s]);
-                                match &mut token2buffer.get_mut(&tk2) {
-                                    Some(bb) => {
-                                        bb.0.push(vbuf);
-                                        bb.1 += s;
-                                        if bb.1 >= self.cache_size {
-                                            clear_readable(&mut pollIns, sss, &tk, &mut token2stat);
-                                        }
+                                let trueconn = if conn.is_none() {
+                                    match  self.plugin.decideTarget(&vbuf, sss_mut.peer_addr().unwrap()) {
+                                        Some(addr) => {
+                                            match TcpStream::connect(addr) {
+                                                Ok(mut ccc) => {
+                                                    pollIns.registry().register(&mut ccc, tk2, Interest::READABLE).unwrap();
+                                                    token2connss.insert(tk2, Rc::new(RefCell::new(ccc)));
+                                                    token2stat.insert(tk2, Interest::READABLE);
+                                                    info!("create connection to {}", addr);
+                                                    Some(token2connss.get(&tk2).unwrap())
+                                                },
+                                                Err(reason) => {
+                                                    info!("fail to create connection to {} '{}', so release resources", addr, reason);
+                                                    None
+                                                }
+                                            }
+                                        },
+                                        None => None,
                                     }
-                                    _ => {
-                                        token2buffer.insert(tk2, (vec![vbuf], s));
-                                        set_writable(&mut pollIns, conn, &tk2, &mut token2stat);
-                                        if s >= self.cache_size {
-                                            clear_readable(&mut pollIns, sss, &tk, &mut token2stat);
+                                } else {
+                                    conn.as_ref()
+                                };
+                                if trueconn.is_none() {
+                                    drop(sss_mut);
+                                    removeConn(tk,  &mut pollIns, &mut token2stream, &mut token2stat, &mut token2connss, &mut token2buffer,
+                                               &mut shutdownMe, &mut alreadyShutdown);
+                                } else {
+                                    match &mut token2buffer.get_mut(&tk2) {
+                                        Some(bb) => {
+                                            bb.0.push(vbuf);
+                                            bb.1 += s;
+                                            if bb.1 >= self.cache_size {
+                                                clear_readable(&mut pollIns, sss_mut, &tk, &mut token2stat);
+                                            }
+                                        }
+                                        _ => {
+                                            token2buffer.insert(tk2, (vec![vbuf], s));
+                                            set_writable(&mut pollIns, &mut trueconn.unwrap().borrow_mut(), &tk2, &mut token2stat);
+                                            if s >= self.cache_size {
+                                                clear_readable(&mut pollIns, sss_mut, &tk, &mut token2stat);
+                                            }
                                         }
                                     }
                                 }
@@ -245,7 +297,8 @@ impl TcpForwarder {
                         },
                         Err(_e) => {
                             info!("close connection {}", _e);
-                            removeConn(tk,  &mut pollIns, &mut token2stream, &mut token2stat, &mut token2connss, &mut token2buffer, 
+                            drop(sss_mut);
+                            removeConn(tk, &mut pollIns, &mut token2stream, &mut token2stat, &mut token2connss, &mut token2buffer, 
                                        &mut shutdownMe, &mut alreadyShutdown);
                             continue;
                         }
@@ -261,14 +314,17 @@ impl TcpForwarder {
                     let bufstat = &mut token2buffer.get_mut(&tk).unwrap();
                     while !bufstat.0.is_empty() {
                         let buf = bufstat.0.first().unwrap();
-                        match sss.write(buf.as_slice()) {
+                        let sss_mut = &mut sss.borrow_mut();
+                        let connx = conn.as_ref().unwrap();
+                        let conn_mut = &mut connx.borrow_mut();
+                        match sss_mut.write(buf.as_slice()) {
                             Ok(s) => {
                                 let bb = bufstat.0.remove(0);
                                 nwrited += s;
                                 if s < bb.len() {
                                     bufstat.0.insert(0, bb.as_slice()[s..bb.len()].to_vec());
                                     if bufstat.1 >= self.cache_size && (bufstat.1 - nwrited) < self.cache_size {
-                                        set_readable(&mut pollIns, conn, &tk2, &mut token2stat);
+                                        set_readable(&mut pollIns, conn_mut, &tk2, &mut token2stat);
                                     }
                                     bufstat.1 -= nwrited;
                                     break;
@@ -276,16 +332,18 @@ impl TcpForwarder {
 
                                 if bufstat.0.is_empty() {
                                     if bufstat.1 >= self.cache_size && (bufstat.1 - nwrited) < self.cache_size {
-                                        set_readable(&mut pollIns, conn, &tk2, &mut token2stat);
+                                        set_readable(&mut pollIns, conn_mut, &tk2, &mut token2stat);
                                     }
-                                    clear_writable(&mut pollIns, sss, &tk, &mut token2stat);
+                                    clear_writable(&mut pollIns, sss_mut, &tk, &mut token2stat);
                                     if shutdownMe.get(&tk).is_some() {
-                                        sss.shutdown(Shutdown::Write).unwrap_or(());
+                                        sss_mut.shutdown(Shutdown::Write).unwrap_or(());
                                         if alreadyShutdown.get(&tk2).is_some() {
+                                            drop(sss_mut);
+                                            drop(conn_mut);
                                             removeConn(tk,  &mut pollIns, &mut token2stream, &mut token2stat, &mut token2connss, &mut token2buffer, 
                                                        &mut shutdownMe, &mut alreadyShutdown);
                                         } else {
-                                            clear_writable(&mut pollIns, sss, &tk, &mut token2stat);
+                                            clear_writable(&mut pollIns, sss_mut, &tk, &mut token2stat);
                                             alreadyShutdown.insert(tk);
                                         }
                                     } else {
@@ -297,10 +355,12 @@ impl TcpForwarder {
                             Err(r) => {
                                 if r.kind() == std::io::ErrorKind::WouldBlock {
                                     if bufstat.1 >= self.cache_size && (bufstat.1 - nwrited) < self.cache_size {
-                                        set_readable(&mut pollIns, conn, &tk2, &mut token2stat);
+                                        set_readable(&mut pollIns, conn_mut, &tk2, &mut token2stat);
                                     }
                                     bufstat.1 -= nwrited;
                                 } else {
+                                    drop(sss_mut);
+                                    drop(conn_mut);
                                     removeConn(tk,  &mut pollIns, &mut token2stream, &mut token2stat, &mut token2connss, &mut token2buffer, 
                                                &mut shutdownMe, &mut alreadyShutdown);
                                 }

@@ -85,10 +85,6 @@ impl FromYaml for ForwardSessionConfig<String> {
             Some(s) => String::from(s),
             None => return Err("missing local"),
         };
-        let remote = match yaml["remote"].as_str() {
-            Some(s) => String::from(s),
-            None => return Err("missing remote"),
-        };
         let enable_tcp = yaml["enable_tcp"].as_bool().unwrap_or(true);
         let enable_udp = yaml["enable_udp"].as_bool().unwrap_or(true);
         let allow_nets_opt = yaml["allow_nets"].as_vec();
@@ -110,7 +106,24 @@ impl FromYaml for ForwardSessionConfig<String> {
                 -1
             };
 
-        Ok(Self {local, remote, enable_tcp, enable_udp, allow_nets, max_connections, conn_bufsize})
+        let mut remoteMap: Vec<(String,String)> = vec![];
+        if let Some(pairs) = yaml["remoteMap"].as_vec() {
+            for pair in pairs {
+                let pattern = pair["pattern"].as_str();
+                let target  = pair["target"].as_str();
+                if pattern.is_some() && target.is_some() {
+                    remoteMap.push((pattern.unwrap().to_string(), target.unwrap().to_string()));
+                }
+            }
+        }
+        match yaml["remote"].as_str() {
+            Some(s) => {
+                remoteMap.push((".*".to_string(), s.to_string()));
+            },
+            None => {},
+        };
+
+        Ok(Self {local, remoteMap, enable_tcp, enable_udp, allow_nets, max_connections, conn_bufsize})
     }
 }
 
@@ -247,10 +260,12 @@ fn main() {
             std::process::exit(1);
         }
 
+        let mut remoteMap: Vec<(String,String)> = vec![];
+        remoteMap.push((".*".to_string(), forward_addr.unwrap()));
         forwarder_configs.push(
             ForwardSessionConfig {
                 local: bind_addr.unwrap(),
-                remote: forward_addr.unwrap(),
+                remoteMap,
                 enable_tcp,
                 enable_udp,
                 allow_nets: whitelist,

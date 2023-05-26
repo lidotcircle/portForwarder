@@ -6,11 +6,14 @@ use hex;
     
 
 pub trait ConnectionPlugin {
+    fn onlySingleTarget(&self) -> Option<SocketAddr>;
     fn decideTarget(&self, buf: &[u8], addr: SocketAddr) -> Option<SocketAddr>;
+    fn testipaddr(&self, addr: &SocketAddr) -> bool;
     fn transform(&mut self, buf: &[u8]) -> Option<Vec<u8>>;
 }
 
 pub struct RegexMultiplexer {
+    utarget: Option<SocketAddr>,
     rules: Vec<(Regex,SocketAddr)>,
     ip_matcher: IpAddrMatcher
 }
@@ -32,15 +35,21 @@ impl From<(Vec<(String,String)>, Vec<String>)> for RegexMultiplexer {
             (regex, addr)
         }).collect();
         let ip_matcher= IpAddrMatcher::from(&regexPlusAllowed.1);
-        RegexMultiplexer { rules, ip_matcher }
+        let utarget = if regexPlusAllowed.0.len() == 1 && regexPlusAllowed.0.get(0).unwrap().0 == ".*" {
+            Some(regexPlusAllowed.0.get(0).unwrap().1.to_socket_addrs().unwrap().next().unwrap())
+        } else {
+            None
+        };
+        RegexMultiplexer { utarget, rules, ip_matcher }
     }
 }
 
 impl ConnectionPlugin for RegexMultiplexer {
-    fn decideTarget(&self, buf: &[u8], addr: SocketAddr) -> Option<SocketAddr> {
-        if !self.ip_matcher.testipaddr(&addr.ip()) {
-            return None;
-        }
+    fn onlySingleTarget(&self) -> Option<SocketAddr> {
+        return self.utarget;
+    }
+
+    fn decideTarget(&self, buf: &[u8], _addr: SocketAddr) -> Option<SocketAddr> {
         let s1 = hex::encode(buf);
         let s2 = String::from_utf8_lossy(buf);
         for rule in &self.rules {
@@ -49,6 +58,10 @@ impl ConnectionPlugin for RegexMultiplexer {
             }
         }
         None
+    }
+
+    fn testipaddr(&self, addr: &SocketAddr) -> bool {
+        self.ip_matcher.testipaddr(&addr.ip())
     }
 
     fn transform(&mut self, _: &[u8]) -> Option<Vec<u8>> {
