@@ -41,7 +41,7 @@ jobs:
         uses: ncipollo/release-action@v1
         with:
           allowUpdates: true
-          artifacts: "./target/release/portForwarder"
+          artifacts: "./target/release/portfd"
           token: ${{ secrets.GITHUB_TOKEN }}
           tag: ${{ needs.setup.outputs.release }}
 
@@ -67,6 +67,6 @@ jobs:
         uses: ncipollo/release-action@v1
         with:
           allowUpdates: true
-          artifacts: "./target/release/portForwarder.exe"
+          artifacts: "./target/release/portfd.exe"
           token: ${{ secrets.GITHUB_TOKEN }}
           tag: ${{ needs.setup.outputs.release }}

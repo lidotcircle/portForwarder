@@ -4,6 +4,7 @@ use std::net::ToSocketAddrs;
 use mio::{Events, Poll, Token, Interest};
 use mio::net::UdpSocket;
 use rand::Rng;
+use std::sync::{Arc, atomic::AtomicBool};
 use std::time::Duration;
 
 
@@ -92,15 +93,17 @@ fn udp_echo<T: ToSocketAddrs>(listen_addr: T) {
 #[test]
 fn test_udp_forwader()
 {
+    let remote_map: Vec<(String, String)> = vec![
+        (".*".to_string(), "localhost:32345".to_string())
+    ];
     let config = ForwardSessionConfig {
         local: "localhost:33833",
-        remote: "localhost:32345",
+        remoteMap: remote_map,
         enable_tcp: false,
-        enable_udp: false,
+        enable_udp: true,
         conn_bufsize: 1024 * 1024,
         allow_nets: ["127.0.0.1/24".to_string()].to_vec(),
-        max_connections: 10,
-        epoll_tcp: true
+        max_connections: 10
     };
     let forwarder_wrap = UdpForwarder::from(&config);
     assert!(forwarder_wrap.is_ok());
@@ -112,7 +115,7 @@ fn test_udp_forwader()
     let h2 = std::thread::spawn(|| {
         udp_sender("localhost:33833");
     });
-    let result = forwarder.listen();
+    let result = forwarder.listen(Arc::new(AtomicBool::from(false)));
     assert!(result.is_ok());
     h2.join().unwrap();
     h1.join().unwrap();
