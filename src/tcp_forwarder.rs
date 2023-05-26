@@ -221,20 +221,22 @@ impl TcpForwarder {
 
                 if event.is_readable() {
                     let mut buf = [0; 1<<16];
-                    let sss_mut = &mut sss.borrow_mut();
+                    let mut sss_mut = sss.borrow_mut();
                     match sss_mut.read(&mut buf[..]) {
                         Ok(s) => {
                             if s == 0 {
                                 if token2buffer.get(&tk2).is_none() {
                                     if conn.is_some() {
-                                        conn.as_ref().unwrap().borrow_mut().shutdown(Shutdown::Write).unwrap_or(());
+                                        let conn_c = conn.as_ref().unwrap().clone();
+                                        let mut conn_mut = conn_c.borrow_mut();
+                                        conn_mut.shutdown(Shutdown::Write).unwrap_or(());
                                         if alreadyShutdown.get(&tk).is_some() {
                                             drop(sss_mut);
                                             removeConn(tk,  &mut pollIns, &mut token2stream, &mut token2stat, &mut token2connss, &mut token2buffer,
                                                        &mut shutdownMe, &mut alreadyShutdown);
                                             continue;
                                         } else {
-                                            clear_writable(&mut pollIns, &mut conn.as_ref().unwrap().borrow_mut(), &tk2, &mut token2stat);
+                                            clear_writable(&mut pollIns, &mut conn_mut, &tk2, &mut token2stat);
                                             alreadyShutdown.insert(tk2);
                                         }
                                     } else {
@@ -258,7 +260,7 @@ impl TcpForwarder {
                                                     token2connss.insert(tk2, Rc::new(RefCell::new(ccc)));
                                                     token2stat.insert(tk2, Interest::READABLE);
                                                     info!("create connection to {}", addr);
-                                                    Some(token2connss.get(&tk2).unwrap())
+                                                    Some(token2connss.get(&tk2).unwrap().clone())
                                                 },
                                                 Err(reason) => {
                                                     info!("fail to create connection to {} '{}', so release resources", addr, reason);
@@ -269,7 +271,7 @@ impl TcpForwarder {
                                         None => None,
                                     }
                                 } else {
-                                    conn.as_ref()
+                                    Some(conn.as_ref().unwrap().clone())
                                 };
                                 if trueconn.is_none() {
                                     drop(sss_mut);
@@ -281,14 +283,14 @@ impl TcpForwarder {
                                             bb.0.push(vbuf);
                                             bb.1 += s;
                                             if bb.1 >= self.cache_size {
-                                                clear_readable(&mut pollIns, sss_mut, &tk, &mut token2stat);
+                                                clear_readable(&mut pollIns, &mut sss_mut, &tk, &mut token2stat);
                                             }
                                         }
                                         _ => {
                                             token2buffer.insert(tk2, (vec![vbuf], s));
-                                            set_writable(&mut pollIns, &mut trueconn.unwrap().borrow_mut(), &tk2, &mut token2stat);
+                                            set_writable(&mut pollIns, &mut trueconn.as_ref().unwrap().borrow_mut(), &tk2, &mut token2stat);
                                             if s >= self.cache_size {
-                                                clear_readable(&mut pollIns, sss_mut, &tk, &mut token2stat);
+                                                clear_readable(&mut pollIns, &mut sss_mut, &tk, &mut token2stat);
                                             }
                                         }
                                     }
@@ -314,9 +316,9 @@ impl TcpForwarder {
                     let bufstat = &mut token2buffer.get_mut(&tk).unwrap();
                     while !bufstat.0.is_empty() {
                         let buf = bufstat.0.first().unwrap();
-                        let sss_mut = &mut sss.borrow_mut();
+                        let mut sss_mut = sss.borrow_mut();
                         let connx = conn.as_ref().unwrap();
-                        let conn_mut = &mut connx.borrow_mut();
+                        let mut conn_mut = connx.borrow_mut();
                         match sss_mut.write(buf.as_slice()) {
                             Ok(s) => {
                                 let bb = bufstat.0.remove(0);
@@ -324,7 +326,7 @@ impl TcpForwarder {
                                 if s < bb.len() {
                                     bufstat.0.insert(0, bb.as_slice()[s..bb.len()].to_vec());
                                     if bufstat.1 >= self.cache_size && (bufstat.1 - nwrited) < self.cache_size {
-                                        set_readable(&mut pollIns, conn_mut, &tk2, &mut token2stat);
+                                        set_readable(&mut pollIns, &mut conn_mut, &tk2, &mut token2stat);
                                     }
                                     bufstat.1 -= nwrited;
                                     break;
@@ -332,9 +334,9 @@ impl TcpForwarder {
 
                                 if bufstat.0.is_empty() {
                                     if bufstat.1 >= self.cache_size && (bufstat.1 - nwrited) < self.cache_size {
-                                        set_readable(&mut pollIns, conn_mut, &tk2, &mut token2stat);
+                                        set_readable(&mut pollIns, &mut conn_mut, &tk2, &mut token2stat);
                                     }
-                                    clear_writable(&mut pollIns, sss_mut, &tk, &mut token2stat);
+                                    clear_writable(&mut pollIns, &mut sss_mut, &tk, &mut token2stat);
                                     if shutdownMe.get(&tk).is_some() {
                                         sss_mut.shutdown(Shutdown::Write).unwrap_or(());
                                         if alreadyShutdown.get(&tk2).is_some() {
@@ -343,7 +345,7 @@ impl TcpForwarder {
                                             removeConn(tk,  &mut pollIns, &mut token2stream, &mut token2stat, &mut token2connss, &mut token2buffer, 
                                                        &mut shutdownMe, &mut alreadyShutdown);
                                         } else {
-                                            clear_writable(&mut pollIns, sss_mut, &tk, &mut token2stat);
+                                            clear_writable(&mut pollIns, &mut sss_mut, &tk, &mut token2stat);
                                             alreadyShutdown.insert(tk);
                                         }
                                     } else {
@@ -355,7 +357,7 @@ impl TcpForwarder {
                             Err(r) => {
                                 if r.kind() == std::io::ErrorKind::WouldBlock {
                                     if bufstat.1 >= self.cache_size && (bufstat.1 - nwrited) < self.cache_size {
-                                        set_readable(&mut pollIns, conn_mut, &tk2, &mut token2stat);
+                                        set_readable(&mut pollIns, &mut conn_mut, &tk2, &mut token2stat);
                                     }
                                     bufstat.1 -= nwrited;
                                 } else {
