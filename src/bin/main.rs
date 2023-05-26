@@ -110,9 +110,9 @@ impl FromYaml for ForwardSessionConfig<String> {
         if let Some(pairs) = yaml["remoteMap"].as_vec() {
             for pair in pairs {
                 let pattern = pair["pattern"].as_str();
-                let target  = pair["target"].as_str();
-                if pattern.is_some() && target.is_some() {
-                    remoteMap.push((pattern.unwrap().to_string(), target.unwrap().to_string()));
+                let remote  = pair["remote"].as_str();
+                if pattern.is_some() && remote.is_some() {
+                    remoteMap.push((pattern.unwrap().to_string(), remote.unwrap().to_string()));
                 }
             }
         }

@@ -232,6 +232,7 @@ impl TcpForwarder {
                                         conn_mut.shutdown(Shutdown::Write).unwrap_or(());
                                         if alreadyShutdown.get(&tk).is_some() {
                                             drop(sss_mut);
+                                            drop(conn_mut);
                                             removeConn(tk,  &mut pollIns, &mut token2stream, &mut token2stat, &mut token2connss, &mut token2buffer,
                                                        &mut shutdownMe, &mut alreadyShutdown);
                                             continue;
