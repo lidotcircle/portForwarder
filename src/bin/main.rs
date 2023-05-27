@@ -30,10 +30,17 @@ fn usage() {
 fn print_example_of_config_file() {
     println!(
 "forwarders:
-  - local: <bind-address/0.0.0.0:1234>
+  - local: 0.0.0.0:8808
+    # specify either 'remoteMap' or 'remote'
     remoteMap:
-      - pattern: \"^SSH-2\\\\.0-.+\"
-        remote: localhost:22
+      - pattern: \"[http:localhost]\"
+        remote: 192.168.44.43:5445
+      - pattern: \"[https:baidu.com]\"
+        remote: \"39.156.66.10:443\"
+      - pattern: \"[ssh]\"
+        remote: \"192.168.44.43:22\"
+      - pattern: .*
+        remote: 192.168.100.46:3389
     remote: <remote-address/127.0.0.1:2233>
     enable_tcp: true # default is true
     enable_udp: true # default is true

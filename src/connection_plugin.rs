@@ -26,11 +26,22 @@ impl From<(Vec<(String,String)>, Vec<String>)> for RegexMultiplexer {
         ].into_iter().collect();
 
         let rules = regexPlusAllowed.0.iter().map(|pair| {
-            let exp = match proto2regex.get(&pair.0.as_str()) {
+            let gexp = match proto2regex.get(&pair.0.as_str()) {
                 Some(re) => *re,
                 None => &pair.0
             };
-            let regex = Regex::new(exp).unwrap();
+
+            let exp = if gexp.starts_with("[http:") && gexp.ends_with("]") {
+                let domain_name = &gexp[6..gexp.len()-1];
+                "^(GET|POST|PUT|DELETE|OPTIONS|HEAD|CONNECT|TRACE).*HTTP.*(.\r\n.*)*".to_string() + domain_name
+            } else if gexp.starts_with("[https:") && gexp.ends_with("]") {
+                let domain_name = &gexp[7..gexp.len()-1];
+                "^160301.*".to_string() + &hex::encode(domain_name) + &".*".to_string()
+            } else {
+                gexp.to_string()
+            };
+
+            let regex = Regex::new(&exp).unwrap();
             let addr = pair.1.to_socket_addrs().unwrap().next().unwrap();
             (regex, addr)
         }).collect();
