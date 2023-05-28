@@ -14,7 +14,7 @@ pub trait ConnectionPlugin {
 
 pub struct RegexMultiplexer {
     utarget: Option<SocketAddr>,
-    rules: Vec<(Regex,SocketAddr)>,
+    rules: Vec<(Box<dyn Fn(&str)->bool + Send + Sync>,SocketAddr)>,
     ip_matcher: IpAddrMatcher
 }
 
@@ -31,19 +31,44 @@ impl From<(Vec<(String,String)>, Vec<String>)> for RegexMultiplexer {
                 None => &pair.0
             };
 
-            let exp = if gexp.starts_with("[http:") && gexp.ends_with("]") {
-                let domain_name = &gexp[6..gexp.len()-1];
-                "^(GET|POST|PUT|DELETE|OPTIONS|HEAD|CONNECT|TRACE).*HTTP.*(.\r\n.*)*".to_string() + domain_name
-            } else if gexp.starts_with("[https:") && gexp.ends_with("]") {
-                let domain_name = &gexp[7..gexp.len()-1];
-                "^160301.*".to_string() + &hex::encode(domain_name) + &".*".to_string()
-            } else {
-                gexp.to_string()
-            };
-
-            let regex = Regex::new(&exp).unwrap();
             let addr = pair.1.to_socket_addrs().unwrap().next().unwrap();
-            (regex, addr)
+            if gexp == "[socks5]" {
+                let func: Box<dyn Fn(&str)->bool + Send + Sync> = Box::new(|s: &str| {
+                    match hex::decode(s) {
+                        Ok(buf) => {
+                            if buf.len() < 3 || buf[0] != 0x05 || buf.len() != usize::from(buf[1]) + 2 {
+                                false
+                            } else {
+                                let mut is_valid = true;
+                                for octet_ in &buf[2..] {
+                                    let octet = *octet_;
+                                    if octet != 0 && octet != 1 && octet != 2 && octet != 3 && octet != 0x80 && octet != 0xFF {
+                                        is_valid = false;
+                                        break;
+                                    }
+                                }
+                                is_valid
+                            }
+                        },
+                        Err(_) => false,
+                    }
+                });
+                return (func, addr);
+            } else {
+                let exp = if gexp.starts_with("[http:") && gexp.ends_with("]") {
+                    let domain_name = &gexp[6..gexp.len()-1];
+                    "^(GET|POST|PUT|DELETE|OPTIONS|HEAD|CONNECT|TRACE).*HTTP.*(.\r\n.*)*".to_string() + domain_name
+                } else if gexp.starts_with("[https:") && gexp.ends_with("]") {
+                    let domain_name = &gexp[7..gexp.len()-1];
+                    "^160301.*".to_string() + &hex::encode(domain_name) + &".*".to_string()
+                } else {
+                    gexp.to_string()
+                };
+
+                let regex = Regex::new(&exp).unwrap();
+                let func: Box<dyn Fn(&str)->bool + Send + Sync> = Box::new(move |s: &str| regex.is_match(s));
+                return (func, addr);
+            }
         }).collect();
         let ip_matcher= IpAddrMatcher::from(&regexPlusAllowed.1);
         let utarget = if regexPlusAllowed.0.len() == 1 && regexPlusAllowed.0.get(0).unwrap().0 == ".*" {
@@ -64,7 +89,7 @@ impl ConnectionPlugin for RegexMultiplexer {
         let s1 = hex::encode(buf);
         let s2 = String::from_utf8_lossy(buf);
         for rule in &self.rules {
-            if rule.0.is_match(&s1) || rule.0.is_match(&s2) {
+            if rule.0(&s1) || rule.0(&s2) {
                 return Some(rule.1);
             }
         }
