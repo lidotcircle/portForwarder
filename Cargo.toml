@@ -3,6 +3,12 @@ name = "portForwarder"
 version = "0.1.0"
 authors = ["analyman <beam.analyman@gmail.com>"]
 edition = "2018"
+license = "MIT"
+description = "a TCP/UDP port multiplexer which forwards connection based on content of traffic"
+homepage = "https://github.com/lidotcircle/portForwarder"
+repository = "https://github.com/lidotcircle/portForwarder"
+documentation = "https://github.com/lidotcircle/portForwarder/blob/master/README.md"
+readme = "README.md"
 
 [lib]
 name = "portforwarder"
