@@ -23,6 +23,8 @@ forwarders:
         remote: "39.156.66.10:443"
       - pattern: "[ssh]"
         remote: "192.168.44.43:22"
+      - pattern: "[socks5]"
+        remote: "192.168.100.46:7890"
       - pattern: .*
         remote: 192.168.100.46:3389
     remote: <remote-address/127.0.0.1:2233>
@@ -39,4 +41,5 @@ The pattern field supports four formats, all of which will be converted to regul
 + `[http] or [http:domain_name]`: Only HTTP traffic or host names of HTTP requests matching domain_name will be forwarded to the specified remote address.
 + `[https:domain_name]`: Matches the SNI (Server Name Indication) in the client hello for HTTPS traffic.
 + `[ssh]`: Only SSH traffic will be forwarded.
++ `[socks5]`: Only socks5 traffic will be forwarded.
 + **any regex**: Only the traffic of the first received packet that matches this regex will be forwarded.

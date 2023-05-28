@@ -39,6 +39,8 @@ fn print_example_of_config_file() {
         remote: \"39.156.66.10:443\"
       - pattern: \"[ssh]\"
         remote: \"192.168.44.43:22\"
+      - pattern: \"[socks5]\"
+        remote: \"192.168.100.46:7890\"
       - pattern: .*
         remote: 192.168.100.46:3389
     remote: <remote-address/127.0.0.1:2233>

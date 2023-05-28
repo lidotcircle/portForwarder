@@ -14,8 +14,60 @@ pub trait ConnectionPlugin {
 
 pub struct RegexMultiplexer {
     utarget: Option<SocketAddr>,
-    rules: Vec<(Box<dyn Fn(&str)->bool + Send + Sync>,SocketAddr)>,
+    rules: Vec<(Box<dyn Fn(&[u8])->bool + Send + Sync>,SocketAddr)>,
     ip_matcher: IpAddrMatcher
+}
+
+fn build_kmp_table(pattern: &[u8]) -> Vec<usize> {
+    let mut table = vec![0; pattern.len()];
+    let mut i = 1;
+    let mut j = 0;
+
+    while i < pattern.len() {
+        if pattern[i] == pattern[j] {
+            j += 1;
+            table[i] = j;
+            i += 1;
+        } else {
+            if j != 0 {
+                j = table[j - 1];
+            } else {
+                table[i] = 0;
+                i += 1;
+            }
+        }
+    }
+
+    table
+}
+
+fn kmp_search(text: &[u8], pattern: &[u8]) -> Option<usize> {
+    if pattern.is_empty() {
+        return Some(0);
+    }
+
+    let table = build_kmp_table(pattern);
+    let mut i = 0;
+    let mut j = 0;
+
+    while i < text.len() {
+        if text[i] == pattern[j] {
+            i += 1;
+            j += 1;
+
+            if j == pattern.len() {
+                return Some(i - j);
+            }
+        } else {
+            if j != 0 {
+                j = table[j - 1];
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    None
 }
 
 impl From<(Vec<(String,String)>, Vec<String>)> for RegexMultiplexer {
@@ -33,40 +85,55 @@ impl From<(Vec<(String,String)>, Vec<String>)> for RegexMultiplexer {
 
             let addr = pair.1.to_socket_addrs().unwrap().next().unwrap();
             if gexp == "[socks5]" {
-                let func: Box<dyn Fn(&str)->bool + Send + Sync> = Box::new(|s: &str| {
-                    match hex::decode(s) {
-                        Ok(buf) => {
-                            if buf.len() < 3 || buf[0] != 0x05 || buf.len() != usize::from(buf[1]) + 2 {
-                                false
-                            } else {
-                                let mut is_valid = true;
-                                for octet_ in &buf[2..] {
-                                    let octet = *octet_;
-                                    if octet != 0 && octet != 1 && octet != 2 && octet != 3 && octet != 0x80 && octet != 0xFF {
-                                        is_valid = false;
-                                        break;
-                                    }
-                                }
-                                is_valid
+                let func: Box<dyn Fn(&[u8])->bool + Send + Sync> = Box::new(|buf: &[u8]| {
+                    if buf.len() < 3 || buf[0] != 0x05 || buf.len() != usize::from(buf[1]) + 2 {
+                        false
+                    } else {
+                        let mut is_valid = true;
+                        for octet_ in &buf[2..] {
+                            let octet = *octet_;
+                            if octet != 0 && octet != 1 && octet != 2 && octet != 3 && octet != 0x80 && octet != 0xFF {
+                                is_valid = false;
+                                break;
                             }
-                        },
-                        Err(_) => false,
+                        }
+                        is_valid
                     }
                 });
                 return (func, addr);
+            } else if gexp.starts_with("[https:") && gexp.ends_with("]") {
+                let domain_name = gexp[7..gexp.len()-1].to_string();
+                let func: Box<dyn Fn(&[u8])->bool + Send + Sync> = Box::new(move |buf: &[u8]| {
+                    if buf.len() < 3 + domain_name.len() {
+                        return false;
+                    }
+                    if buf[0] != 0x16 && buf[1] != 0x03 && buf[2] != 0x01 {
+                        return false;
+                    }
+                    return kmp_search(buf, domain_name.as_bytes()).is_some();
+                });
+                (func, addr)
             } else {
                 let exp = if gexp.starts_with("[http:") && gexp.ends_with("]") {
                     let domain_name = &gexp[6..gexp.len()-1];
                     "^(GET|POST|PUT|DELETE|OPTIONS|HEAD|CONNECT|TRACE).*HTTP.*(.\r\n.*)*".to_string() + domain_name
-                } else if gexp.starts_with("[https:") && gexp.ends_with("]") {
-                    let domain_name = &gexp[7..gexp.len()-1];
-                    "^160301.*".to_string() + &hex::encode(domain_name) + &".*".to_string()
                 } else {
                     gexp.to_string()
                 };
 
                 let regex = Regex::new(&exp).unwrap();
-                let func: Box<dyn Fn(&str)->bool + Send + Sync> = Box::new(move |s: &str| regex.is_match(s));
+                let func: Box<dyn Fn(&[u8])->bool + Send + Sync> = Box::new(move |buf: &[u8]| {
+                    let s1 = hex::encode(buf);
+                    if regex.is_match(&s1) {
+                        return true;
+                    }
+                    let s2 = String::from_utf8_lossy(buf);
+                    if regex.is_match(&s2) {
+                        return true;
+                    }
+
+                    return false;
+                });
                 return (func, addr);
             }
         }).collect();
@@ -86,10 +153,8 @@ impl ConnectionPlugin for RegexMultiplexer {
     }
 
     fn decideTarget(&self, buf: &[u8], _addr: SocketAddr) -> Option<SocketAddr> {
-        let s1 = hex::encode(buf);
-        let s2 = String::from_utf8_lossy(buf);
         for rule in &self.rules {
-            if rule.0(&s1) || rule.0(&s2) {
+            if rule.0(&buf) {
                 return Some(rule.1);
             }
         }
