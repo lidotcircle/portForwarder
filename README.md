@@ -5,7 +5,7 @@ different addresses based on regex pattern matching in the first packet sent by 
 
 ### Usage
 
-You can build this tool from source or download the prebuilt binary called `portfd` from the [release page](https://github.com/lidotcircle/portForwarder/releases).
+You can build this tool from source with `cargo install portForwarder` or download the prebuilt binary called `portfd` from the [release page](https://github.com/lidotcircle/portForwarder/releases).
 
 To run `portfd` with simple command line arguments, use the following syntax: `portfd <local-bind> <remote>`.
 In this case, you need to specify the listening address and the remote address.
