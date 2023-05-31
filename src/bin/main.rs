@@ -80,27 +80,18 @@ pub fn convert_to_bytes(input: &str) -> Option<usize> {
 }
 
 pub trait FromYaml: Sized {
-    fn run(&self) -> std::thread::JoinHandle<()>;
+    fn run(&self, sync_pair: Arc<(Mutex<bool>, Condvar)>) -> std::thread::JoinHandle<()>;
     fn fromYaml(yaml: &Yaml) -> Result<Self,&'static str>;
 }
 
 impl FromYaml for ForwardSessionConfig<String> {
-    fn run(&self) -> std::thread::JoinHandle<()> {
+    fn run(&self, sync_pair: Arc<(Mutex<bool>, Condvar)>) -> std::thread::JoinHandle<()> {
         let cp = self.clone();
         std::thread::spawn(move || {
             let forwarder = TcpUdpForwarder::from(&cp).unwrap();
             let close_handler = forwarder.listen();
-            let pair = Arc::new((Mutex::new(false), Condvar::new()));
-            let pair2 = Arc::clone(&pair);
-            ctrlc::set_handler(move || {
-                println!("ctrl-c pressed, exiting ...");
-                let (lock, cvar) = &*pair2;
-                let mut close = lock.lock().unwrap();
-                *close = true;
-                cvar.notify_one();
-            }).unwrap();
 
-            let (lock, cvar) = &*pair;
+            let (lock, cvar) = &*sync_pair;
             let mut closed = lock.lock().unwrap();
             while !*closed {
                 closed = cvar.wait(closed).unwrap();
@@ -305,8 +296,18 @@ fn main() {
     }
 
     let mut handlers = vec![];
+    let sync_pair = Arc::new((Mutex::new(false), Condvar::new()));
+    let pair2 = sync_pair.clone();
+    ctrlc::set_handler(move || {
+        println!("ctrl-c pressed, exiting ...");
+        let (lock, cvar) = &*pair2;
+        let mut close = lock.lock().unwrap();
+        *close = true;
+        cvar.notify_all();
+    }).unwrap();
+
     for cc in forwarder_configs {
-        handlers.push(cc.run());
+        handlers.push(cc.run(sync_pair.clone()));
     }
 
     for h in handlers {

@@ -131,7 +131,7 @@ impl TcpForwarder {
                 clear_writable(pollIns, &mut token2connss.get(&t2).unwrap().borrow_mut(), &t2, token2stat);
             }
             token2stream.remove(&t1).unwrap();
-            token2connss.remove(&t2).unwrap();
+            token2connss.remove(&t2);
             token2buffer.remove(&t1);
             token2buffer.remove(&t2);
             shutdownMe.remove(&t1);
