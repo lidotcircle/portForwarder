@@ -101,6 +101,34 @@ impl From<(Vec<(String,String)>, Vec<String>)> for RegexMultiplexer {
                     }
                 });
                 return (func, addr);
+            } else if gexp == "[rdp]" {
+                let func: Box<dyn Fn(&[u8])->bool + Send + Sync> = Box::new(|buf: &[u8]| {
+                    if buf.len() < 11 || buf[0] != 0x03 {
+                        return false;
+                    }
+
+                    let length = u16::from_be_bytes([buf[2], buf[3]]) as usize;
+                    if length != buf.len() {
+                        return false;
+                    }
+
+                    if (buf[4] as usize + 5) != buf.len() {
+                        return false;
+                    }
+
+                    // connection request
+                    if buf[5] & 0xE0 != 0xE0 {
+                        return false;
+                    }
+
+                    // DST-REF
+                    if buf[6] != 0 || buf[7] != 0 {
+                        return false;
+                    }
+
+                    true
+                });
+                return (func, addr);
             } else if gexp.starts_with("[https:") && gexp.ends_with("]") {
                 let domain_name = gexp[7..gexp.len()-1].to_string();
                 let func: Box<dyn Fn(&[u8])->bool + Send + Sync> = Box::new(move |buf: &[u8]| {

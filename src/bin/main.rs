@@ -41,8 +41,10 @@ fn print_example_of_config_file() {
         remote: \"192.168.44.43:22\"
       - pattern: \"[socks5]\"
         remote: \"192.168.100.46:7890\"
-      - pattern: .*
+      - pattern: \"[rdp]\"
         remote: 192.168.100.46:3389
+      - pattern: .*
+        remote: 192.168.100.46:23
     remote: <remote-address/127.0.0.1:2233>
     enable_tcp: true # default is true
     enable_udp: true # default is true

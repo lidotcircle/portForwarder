@@ -1,6 +1,6 @@
 [package]
 name = "portForwarder"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["analyman <beam.analyman@gmail.com>"]
 edition = "2018"
 license = "MIT"
