@@ -1,4 +1,12 @@
-## Application Protocol Multiplexer
+<div align="center">
+  <h1>Application Protocol Multiplexer</h1>
+  <div>
+    <a href="https://github.com/lidotcircle/portForwarder/actions"><img src="https://github.com/lidotcircle/portForwarder/actions/workflows/release.yml/badge.svg" alt="CI Status" /></a>
+  </div>
+  <div>
+    <a href="https://crates.io/crates/portForwarder">Crate 🦀</a>
+  </div>
+</div>
 
 The Application Protocol Multiplexer is a tool that allows you to forward TCP or UDP traffic to 
 different addresses based on regex pattern matching in the first packet sent by the client.
