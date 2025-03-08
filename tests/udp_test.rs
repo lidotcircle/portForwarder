@@ -133,7 +133,7 @@ fn run_udp_forwarder(finished: Arc<AtomicBool>) {
         enable_tcp: false,
         enable_udp: true,
         conn_bufsize: 1024 * 1024,
-        allow_nets: ["127.0.0.1/24".to_string()].to_vec(),
+        allow_nets: ["127.0.0.1/24".to_string(), "::1/128".to_string()].to_vec(),
         max_connections: 10,
     };
     let forwarder_wrap = UdpForwarder::from(&config);

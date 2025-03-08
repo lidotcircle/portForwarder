@@ -5,7 +5,7 @@ use portforwarder::forward_config::ForwardSessionConfig;
 use portforwarder::tcp_forwarder::TcpForwarder;
 use rand::Rng;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Write};
 use std::net::ToSocketAddrs;
 use std::rc::Rc;
@@ -92,7 +92,10 @@ fn tcp_echo<T: ToSocketAddrs>(listen_addr: T, finished: Arc<AtomicBool>) {
 
     let mut poll = Poll::new().unwrap();
     let mut connections = HashMap::new();
+    let mut finished_connections = HashSet::new();
     let mut next_token = 1;
+    let mut recieved_bytes: u64 = 0;
+    let mut send_bytes: u64 = 0;
 
     poll.registry()
         .register(&mut listener, Token(0), Interest::READABLE)
@@ -138,6 +141,7 @@ fn tcp_echo<T: ToSocketAddrs>(listen_addr: T, finished: Arc<AtomicBool>) {
                                     break;
                                 }
                                 Ok(n) => {
+                                    recieved_bytes += n as u64;
                                     write_buf.extend_from_slice(&read_buf[..n]);
                                 }
                                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
@@ -156,7 +160,10 @@ fn tcp_echo<T: ToSocketAddrs>(listen_addr: T, finished: Arc<AtomicBool>) {
                         }
 
                         if remove_stream {
-                            connections.remove(&token);
+                            finished_connections.insert(token);
+                            poll.registry()
+                                .reregister(&mut *stream.borrow_mut(), token, Interest::WRITABLE)
+                                .unwrap();
                         }
                     }
 
@@ -174,18 +181,26 @@ fn tcp_echo<T: ToSocketAddrs>(listen_addr: T, finished: Arc<AtomicBool>) {
                                 Err(e) => panic!("Failed to write: {}", e),
                             }
                         }
+                        send_bytes += written as u64;
                         write_buf.drain(0..written);
 
                         if write_buf.is_empty() {
                             poll.registry()
                                 .reregister(&mut *stream.borrow_mut(), token, Interest::READABLE)
                                 .unwrap();
+
+                            if finished_connections.contains(&token) {
+                                connections.remove(&token);
+                                finished_connections.remove(&token);
+                            }
                         }
                     }
                 }
             }
         }
     }
+
+    assert_eq!(recieved_bytes, send_bytes);
 }
 
 fn run_tcp_forwarder(finished: Arc<AtomicBool>) {
@@ -196,7 +211,7 @@ fn run_tcp_forwarder(finished: Arc<AtomicBool>) {
         enable_tcp: true,
         enable_udp: false,
         conn_bufsize: 1024 * 1024,
-        allow_nets: vec!["127.0.0.1/24".to_string()],
+        allow_nets: vec!["127.0.0.1/24".to_string(), "::1/128".to_string()],
         max_connections: 10,
     };
     let forwarder = TcpForwarder::from(&config).unwrap();

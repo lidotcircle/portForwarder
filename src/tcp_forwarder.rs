@@ -162,6 +162,11 @@ impl TcpForwarder {
         };
         let mut events = Events::with_capacity(capacity);
 
+        let mut inComingPeerRecieveBytes: u64 = 0;
+        let mut inComingPeerSendBytes: u64 = 0;
+        let mut outGoingPeerRecieveBytes: u64 = 0;
+        let mut outGoingPeerSendBytes: u64 = 0;
+
         let mut conn_token = Token(1);
         let mut token2stream: HashMap<Token, (Rc<RefCell<TcpStream>>, SocketAddr)> = HashMap::new();
         let mut token2connss: HashMap<Token, Rc<RefCell<TcpStream>>> = HashMap::new();
@@ -234,6 +239,9 @@ impl TcpForwarder {
 
         loop {
             if closed.load(std::sync::atomic::Ordering::SeqCst) {
+                log::debug!(
+                    "tcp forwarder closed: inComingPeerRecieveBytes = {inComingPeerRecieveBytes}, inComingPeerSendBytes = {inComingPeerSendBytes}, outGoingPeerRecieveBytes = {outGoingPeerRecieveBytes}, outGoingPeerSendBytes = {outGoingPeerSendBytes}"
+                );
                 return Ok(());
             }
 
@@ -400,6 +408,11 @@ impl TcpForwarder {
                                         s,
                                         SafeAddr(&sss_mut.peer_addr())
                                     );
+                                    if tk.0 % 2 == 0 {
+                                        inComingPeerRecieveBytes += s as u64;
+                                    } else {
+                                        outGoingPeerRecieveBytes += s as u64;
+                                    }
                                     let vbuf = Vec::from(&buf[0..s]);
                                     let trueconn = if peerConnOpt.is_none() {
                                         match self
@@ -530,6 +543,11 @@ impl TcpForwarder {
                                     SafeAddr(&conn_mut.peer_addr()),
                                     SafeAddr(&sss_mut.peer_addr())
                                 );
+                                if tk.0 % 2 == 0 {
+                                    inComingPeerSendBytes += s as u64;
+                                } else {
+                                    outGoingPeerSendBytes += s as u64;
+                                }
                                 let bb = bufstat.0.remove(0);
                                 nwrited += s;
                                 if s < bb.len() {
