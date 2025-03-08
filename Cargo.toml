@@ -26,7 +26,7 @@ env_logger = "0.10.0"
 hex = "0.4.3"
 ipnet = "2.7.1"
 log = "0.4.17"
-mio = { version = "0.8", features = ["os-poll", "net"] }
+mio = { version = "1.0.3", features = ["os-poll", "net"] }
 rand = "0.8.5"
 regex = "1"
 yaml-rust = "0.4.5"
