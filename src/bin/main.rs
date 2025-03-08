@@ -1,21 +1,20 @@
 #![allow(non_snake_case)]
 extern crate portforwarder;
 
-use portforwarder::tcp_udp_forwarder::TcpUdpForwarder;
 use portforwarder::forward_config::ForwardSessionConfig;
+use portforwarder::tcp_udp_forwarder::TcpUdpForwarder;
 use regex::Regex;
 use std::fs;
-use std::sync::atomic::{Ordering, AtomicBool};
-use std::sync::{Arc, Condvar, Mutex};
 use std::panic;
 use std::process;
-use yaml_rust::{YamlLoader, Yaml};
-
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use yaml_rust::{Yaml, YamlLoader};
 
 fn usage() {
     let args: Vec<String> = std::env::args().collect();
     println!(
-"usage:
+        "usage:
     {} [-htu] <bind-address> <forward-address>
     {} -c <yaml-config-file>
 
@@ -27,12 +26,14 @@ fn usage() {
     -m    max connections
     -c    config file (a yaml file)
     -e    show an example of config file
-    -h    show help", args[0], args[0]);
+    -h    show help",
+        args[0], args[0]
+    );
 }
 
 fn print_example_of_config_file() {
     println!(
-"forwarders:
+        "forwarders:
   - local: 0.0.0.0:8808
     # specify either 'remoteMap' or 'remote'
     remoteMap:
@@ -54,7 +55,8 @@ fn print_example_of_config_file() {
     conn_bufsize: 2MB
     max_connections: 10000 # optional
     allow_nets: # optional
-      - 127.0.0.0/24");
+      - 127.0.0.0/24"
+    );
 }
 
 pub fn convert_to_bytes(input: &str) -> Option<usize> {
@@ -75,7 +77,9 @@ pub fn convert_to_bytes(input: &str) -> Option<usize> {
         Err(_) => return None,
     };
 
-    let unit_index = units.iter().position(|&u| u == unit_str.trim().to_uppercase());
+    let unit_index = units
+        .iter()
+        .position(|&u| u == unit_str.trim().to_uppercase());
 
     if let Some(index) = unit_index {
         Some(num * (1024 as usize).pow(index as u32))
@@ -86,7 +90,7 @@ pub fn convert_to_bytes(input: &str) -> Option<usize> {
 
 pub trait FromYaml: Sized {
     fn run(&self, sync_pair: Arc<(Mutex<bool>, Condvar)>) -> std::thread::JoinHandle<()>;
-    fn fromYaml(yaml: &Yaml) -> Result<Self,&'static str>;
+    fn fromYaml(yaml: &Yaml) -> Result<Self, &'static str>;
 }
 
 impl FromYaml for ForwardSessionConfig<String> {
@@ -103,9 +107,9 @@ impl FromYaml for ForwardSessionConfig<String> {
             }
             close_handler();
         })
-   }
+    }
 
-    fn fromYaml(yaml: &Yaml) -> Result<Self,&'static str> {
+    fn fromYaml(yaml: &Yaml) -> Result<Self, &'static str> {
         let local = match yaml["local"].as_str() {
             Some(s) => String::from(s),
             None => return Err("missing local"),
@@ -113,8 +117,9 @@ impl FromYaml for ForwardSessionConfig<String> {
         let enable_tcp = yaml["enable_tcp"].as_bool().unwrap_or(true);
         let enable_udp = yaml["enable_udp"].as_bool().unwrap_or(true);
         let allow_nets_opt = yaml["allow_nets"].as_vec();
-        let mut allow_nets = vec!();
-        let conn_bufsize = convert_to_bytes(yaml["conn_bufsize"].as_str().unwrap_or("2MB")).unwrap();
+        let mut allow_nets = vec![];
+        let conn_bufsize =
+            convert_to_bytes(yaml["conn_bufsize"].as_str().unwrap_or("2MB")).unwrap();
 
         if let Some(nets) = allow_nets_opt {
             for _net in nets {
@@ -124,18 +129,17 @@ impl FromYaml for ForwardSessionConfig<String> {
             }
         }
 
-        let max_connections =
-            if let Some(mc) = yaml["max_connections"].as_i64() {
-                mc
-            } else {
-                -1
-            };
+        let max_connections = if let Some(mc) = yaml["max_connections"].as_i64() {
+            mc
+        } else {
+            -1
+        };
 
-        let mut remoteMap: Vec<(String,String)> = vec![];
+        let mut remoteMap: Vec<(String, String)> = vec![];
         if let Some(pairs) = yaml["remoteMap"].as_vec() {
             for pair in pairs {
                 let pattern = pair["pattern"].as_str();
-                let remote  = pair["remote"].as_str();
+                let remote = pair["remote"].as_str();
                 if pattern.is_some() && remote.is_some() {
                     remoteMap.push((pattern.unwrap().to_string(), remote.unwrap().to_string()));
                 }
@@ -144,17 +148,26 @@ impl FromYaml for ForwardSessionConfig<String> {
         match yaml["remote"].as_str() {
             Some(s) => {
                 remoteMap.push((".*".to_string(), s.to_string()));
-            },
-            None => {},
+            }
+            None => {}
         };
 
-        Ok(Self {local, remoteMap, enable_tcp, enable_udp, allow_nets, max_connections, conn_bufsize})
+        Ok(Self {
+            local,
+            remoteMap,
+            enable_tcp,
+            enable_udp,
+            allow_nets,
+            max_connections,
+            conn_bufsize,
+        })
     }
 }
 
 fn main() {
     env_logger::init_from_env(
-        env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"));
+        env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"),
+    );
     let mut bind_addr = None;
     let mut forward_addr = None;
     let mut enable_tcp = true;
@@ -184,7 +197,7 @@ fn main() {
                 enable_udp = false;
             }
             "-t" => {
-                enable_tcp= false;
+                enable_tcp = false;
             }
             "-e" => {
                 print_example_of_config_file();
@@ -192,7 +205,7 @@ fn main() {
             }
             "-s" => {
                 if i + 1 < args.len() {
-                    conn_bufsize = convert_to_bytes(args[i+1].as_str()).unwrap();
+                    conn_bufsize = convert_to_bytes(args[i + 1].as_str()).unwrap();
                     skipnext = true;
                 } else {
                     usage();
@@ -201,25 +214,25 @@ fn main() {
             }
             "-w" => {
                 if i + 1 < args.len() {
-                    whitelist = args[i+1].split(",").map(|s| String::from(s)).collect();
+                    whitelist = args[i + 1].split(",").map(|s| String::from(s)).collect();
                     skipnext = true;
                 } else {
                     usage();
                     std::process::exit(1);
                 }
-            },
+            }
             "-m" => {
                 if i + 1 < args.len() {
-                    max_connections = args[i+1].parse().unwrap();
+                    max_connections = args[i + 1].parse().unwrap();
                     skipnext = true;
                 } else {
                     usage();
                     std::process::exit(1);
                 }
-            },
+            }
             "-c" => {
                 if i + 1 < args.len() {
-                    config_file = Some(args[i+1].clone());
+                    config_file = Some(args[i + 1].clone());
                     break;
                 } else {
                     usage();
@@ -257,7 +270,10 @@ fn main() {
 
                 let forwarders = &config["forwarders"];
                 if !forwarders.is_array() {
-                    println!("invalid config file, expect an array but get {:?}", forwarders);
+                    println!(
+                        "invalid config file, expect an array but get {:?}",
+                        forwarders
+                    );
                     std::process::exit(1);
                 }
 
@@ -285,19 +301,17 @@ fn main() {
             std::process::exit(1);
         }
 
-        let mut remoteMap: Vec<(String,String)> = vec![];
+        let mut remoteMap: Vec<(String, String)> = vec![];
         remoteMap.push((".*".to_string(), forward_addr.unwrap()));
-        forwarder_configs.push(
-            ForwardSessionConfig {
-                local: bind_addr.unwrap(),
-                remoteMap,
-                enable_tcp,
-                enable_udp,
-                allow_nets: whitelist,
-                max_connections,
-                conn_bufsize,
-            }
-        );
+        forwarder_configs.push(ForwardSessionConfig {
+            local: bind_addr.unwrap(),
+            remoteMap,
+            enable_tcp,
+            enable_udp,
+            allow_nets: whitelist,
+            max_connections,
+            conn_bufsize,
+        });
     }
 
     panic::set_hook(Box::new(|panic_info| {
@@ -319,7 +333,8 @@ fn main() {
         let mut close = lock.lock().unwrap();
         *close = true;
         cvar.notify_all();
-    }).unwrap();
+    })
+    .unwrap();
 
     for cc in forwarder_configs {
         handlers.push(cc.run(sync_pair.clone()));

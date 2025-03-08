@@ -1,10 +1,9 @@
 use std::net::ToSocketAddrs;
 
-
 #[derive(Clone, Debug)]
 pub struct ForwardSessionConfig<T: ToSocketAddrs> {
     pub local: T,
-    pub remoteMap: Vec<(String,String)>,
+    pub remoteMap: Vec<(String, String)>,
     pub allow_nets: Vec<String>,
     pub enable_tcp: bool,
     pub enable_udp: bool,

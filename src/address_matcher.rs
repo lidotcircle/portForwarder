@@ -1,8 +1,7 @@
 extern crate ipnet;
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
-use ipnet::{IpNet, Ipv4Net, Ipv6Net};
-
 
 #[derive(Clone)]
 pub struct IpAddrMatcher {
@@ -36,7 +35,7 @@ impl IpAddrMatcher {
                             return true;
                         }
                     }
-                },
+                }
                 IpNet::V6(n6) => {
                     if let IpAddr::V6(v6) = ipaddr {
                         if n6.contains(v6) {

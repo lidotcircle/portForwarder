@@ -1,8 +1,8 @@
-use crate::udp_forwarder::UdpForwarder;
 use crate::forward_config::ForwardSessionConfig;
 use crate::tcp_forwarder::TcpForwarder;
-use std::net::ToSocketAddrs;
+use crate::udp_forwarder::UdpForwarder;
 use std::error::Error;
+use std::net::ToSocketAddrs;
 use std::result::Result;
 use std::sync::{Arc, atomic::AtomicBool};
 
@@ -13,8 +13,9 @@ pub struct TcpUdpForwarder {
 }
 
 impl TcpUdpForwarder {
-    pub fn from<T>(config: &ForwardSessionConfig<T>)
-        -> Result<TcpUdpForwarder, Box<dyn Error>> where T: ToSocketAddrs
+    pub fn from<T>(config: &ForwardSessionConfig<T>) -> Result<TcpUdpForwarder, Box<dyn Error>>
+    where
+        T: ToSocketAddrs,
     {
         assert!(config.enable_tcp || config.enable_udp);
 
@@ -40,23 +41,19 @@ impl TcpUdpForwarder {
         if self.tcpe.is_some() {
             let m = self.tcpe.clone();
             let tcp_closed = closed.clone();
-            tte = Some(std::thread::spawn(move || {
-                match m.as_ref() {
-                    Some(l) => {
-                        l.listen(tcp_closed).unwrap_or_default();
-                    },
-                    None => {}
+            tte = Some(std::thread::spawn(move || match m.as_ref() {
+                Some(l) => {
+                    l.listen(tcp_closed).unwrap_or_default();
                 }
+                None => {}
             }));
         }
         if self.udp.is_some() {
             let m = self.udp.clone();
             let udp_closed = closed.clone();
-            tu = Some(std::thread::spawn(move || {
-                match m.as_ref() {
-                    Some(l) => l.listen(udp_closed).unwrap_or_default(),
-                    None => {}
-                }
+            tu = Some(std::thread::spawn(move || match m.as_ref() {
+                Some(l) => l.listen(udp_closed).unwrap_or_default(),
+                None => {}
             }));
         }
 

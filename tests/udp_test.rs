@@ -1,26 +1,31 @@
-use portforwarder::udp_forwarder::UdpForwarder;
-use portforwarder::forward_config::ForwardSessionConfig;
-use std::net::ToSocketAddrs;
-use mio::{Events, Poll, Token, Interest};
 use mio::net::UdpSocket;
+use mio::{Events, Interest, Poll, Token};
+use portforwarder::forward_config::ForwardSessionConfig;
+use portforwarder::udp_forwarder::UdpForwarder;
 use rand::Rng;
+use std::net::ToSocketAddrs;
 use std::sync::{Arc, atomic::AtomicBool};
 use std::time::Duration;
 
-
 fn udp_sender<T: ToSocketAddrs>(addr: T) {
     // Create a UDP socket and bind it to a random local port
-    let mut socket = UdpSocket::bind("0.0.0.0:0".to_socket_addrs().unwrap().next().unwrap()).expect("Failed to bind UDP socket");
+    let mut socket = UdpSocket::bind("0.0.0.0:0".to_socket_addrs().unwrap().next().unwrap())
+        .expect("Failed to bind UDP socket");
 
     // Resolve the server address
-    let server_addr = match addr.to_socket_addrs().expect("Failed to resolve server address").next() {
+    let server_addr = match addr
+        .to_socket_addrs()
+        .expect("Failed to resolve server address")
+        .next()
+    {
         Some(addr) => addr,
         None => panic!("Failed to resolve server address"),
     };
 
     let mut poll = Poll::new().expect("Failed to create Poll instance");
     let token = Token(0);
-    poll.registry().register(&mut socket, token, Interest::WRITABLE | Interest::READABLE)
+    poll.registry()
+        .register(&mut socket, token, Interest::WRITABLE | Interest::READABLE)
         .expect("Failed to register UDP socket with Poll");
 
     let mut rng = rand::thread_rng();
@@ -41,7 +46,8 @@ fn udp_sender<T: ToSocketAddrs>(addr: T) {
                 Token(0) => {
                     if event.is_readable() {
                         let mut response_buffer = [0; RECIEVE_BUFSIZE];
-                        let (num_bytes, _) = socket.recv_from(&mut response_buffer)
+                        let (num_bytes, _) = socket
+                            .recv_from(&mut response_buffer)
                             .expect("Failed to receive UDP packet");
                         if num_bytes > 0 {
                             assert!(buf_storage.len() >= num_bytes);
@@ -54,7 +60,8 @@ fn udp_sender<T: ToSocketAddrs>(addr: T) {
 
                     if event.is_writable() && write_to_socket {
                         rng.fill(&mut buffer[..]);
-                        let s = socket.send_to(&buffer[..], server_addr)
+                        let s = socket
+                            .send_to(&buffer[..], server_addr)
                             .expect("Failed to send UDP packet");
                         buf_storage.append(&mut buffer.clone()[0..s].to_vec());
                     }
@@ -84,18 +91,15 @@ fn udp_echo<T: ToSocketAddrs>(listen_addr: T) {
         }
 
         // Send the received buffer back to the client
-        let _ = socket.send_to(&buffer[..num_bytes], client_addr)
+        let _ = socket
+            .send_to(&buffer[..num_bytes], client_addr)
             .expect("Failed to send UDP packet");
     }
 }
 
-
 #[test]
-fn test_udp_forwader()
-{
-    let remote_map: Vec<(String, String)> = vec![
-        (".*".to_string(), "localhost:32345".to_string())
-    ];
+fn test_udp_forwader() {
+    let remote_map: Vec<(String, String)> = vec![(".*".to_string(), "localhost:32345".to_string())];
     let config = ForwardSessionConfig {
         local: "localhost:33833",
         remoteMap: remote_map,
@@ -103,7 +107,7 @@ fn test_udp_forwader()
         enable_udp: true,
         conn_bufsize: 1024 * 1024,
         allow_nets: ["127.0.0.1/24".to_string()].to_vec(),
-        max_connections: 10
+        max_connections: 10,
     };
     let forwarder_wrap = UdpForwarder::from(&config);
     assert!(forwarder_wrap.is_ok());

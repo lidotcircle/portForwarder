@@ -1,10 +1,10 @@
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::net::{SocketAddr, ToSocketAddrs};
 
 pub struct ArcRel<'a> {
-    v: &'a Arc<AtomicBool>
+    v: &'a Arc<AtomicBool>,
 }
 
 impl<'a> Drop for ArcRel<'a> {
@@ -13,7 +13,9 @@ impl<'a> Drop for ArcRel<'a> {
     }
 }
 
-pub fn toSockAddr<T>(addr: &T) -> SocketAddr 
-where T: ToSocketAddrs {
+pub fn toSockAddr<T>(addr: &T) -> SocketAddr
+where
+    T: ToSocketAddrs,
+{
     addr.to_socket_addrs().unwrap().next().unwrap()
 }
