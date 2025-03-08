@@ -8,10 +8,7 @@ use std::net::ToSocketAddrs;
 use std::sync::{Arc, atomic::AtomicBool};
 use std::time::Duration;
 
-static SEND_FINISHED: std::sync::LazyLock<Arc<AtomicBool>> =
-    std::sync::LazyLock::new(|| Arc::new(AtomicBool::new(false)));
-
-fn udp_sender<T: ToSocketAddrs>(addr: T) {
+fn udp_sender<T: ToSocketAddrs>(addr: T, finished: Arc<AtomicBool>) {
     // Create a UDP socket and bind it to a random local port
     let mut socket = UdpSocket::bind("0.0.0.0:0".to_socket_addrs().unwrap().next().unwrap())
         .expect("Failed to bind UDP socket");
@@ -91,15 +88,15 @@ fn udp_sender<T: ToSocketAddrs>(addr: T) {
         }
     }
     println!("sender has completed his work!!!");
-    SEND_FINISHED.store(true, std::sync::atomic::Ordering::SeqCst);
+    finished.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
-fn udp_echo<T: ToSocketAddrs>(listen_addr: T) {
+fn udp_echo<T: ToSocketAddrs>(listen_addr: T, finished: Arc<AtomicBool>) {
     let addr = listen_addr.to_socket_addrs().unwrap().next().unwrap();
     let socket = UdpSocket::bind(addr).expect("Failed to bind UDP socket");
     let mut recieved_bytes = 0;
 
-    while SEND_FINISHED.load(std::sync::atomic::Ordering::SeqCst) == false {
+    while finished.load(std::sync::atomic::Ordering::SeqCst) == false {
         // Create a buffer to store the received data
         let mut buffer = [0; 1024];
 
@@ -128,7 +125,7 @@ fn udp_echo<T: ToSocketAddrs>(listen_addr: T) {
     }
 }
 
-fn run_udp_forwarder() {
+fn run_udp_forwarder(finished: Arc<AtomicBool>) {
     let remote_map: Vec<(String, String)> = vec![(".*".to_string(), "localhost:32345".to_string())];
     let config = ForwardSessionConfig {
         local: "localhost:33833",
@@ -142,7 +139,7 @@ fn run_udp_forwarder() {
     let forwarder_wrap = UdpForwarder::from(&config);
     assert!(forwarder_wrap.is_ok());
     let forwarder = forwarder_wrap.unwrap();
-    let result = forwarder.listen(SEND_FINISHED.clone());
+    let result = forwarder.listen(finished.clone());
     assert!(result.is_ok());
 }
 
@@ -153,18 +150,23 @@ fn test_udp_forwader() {
         env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "debug"),
     );
 
-    let fd = std::thread::spawn(|| {
-        run_udp_forwarder();
-    });
-    let h1 = std::thread::spawn(|| {
-        udp_echo("localhost:32345");
+    let finished: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    let lx1 = finished.clone();
+    let fd = std::thread::spawn(move || {
+        run_udp_forwarder(lx1);
     });
     std::thread::sleep(std::time::Duration::from_secs(1));
+
+    let lx2 = finished.clone();
+    let h1 = std::thread::spawn(move || {
+        udp_echo("localhost:32345", lx2);
+    });
+    let lx3 = finished.clone();
     let h2 = std::thread::spawn(|| {
-        udp_sender("localhost:33833");
+        udp_sender("localhost:33833", lx3);
     });
     h2.join().unwrap();
     h1.join().unwrap();
     fd.join().unwrap();
-    assert!(SEND_FINISHED.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(finished.load(std::sync::atomic::Ordering::SeqCst));
 }

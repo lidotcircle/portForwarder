@@ -19,6 +19,13 @@ pub struct TcpForwarder {
     cache_size: usize,
 }
 
+fn SafeAddr(addr: &std::io::Result<SocketAddr>) -> String {
+    match addr {
+        Ok(addr) => addr.to_string(),
+        Err(_) => "unknown".to_string(),
+    }
+}
+
 fn nextToken(token: &mut Token) -> Token {
     token.0 = token.0 + 1;
     *token
@@ -391,7 +398,7 @@ impl TcpForwarder {
                                     log::debug!(
                                         "read buffer[{}] from {}",
                                         s,
-                                        sss_mut.peer_addr().unwrap()
+                                        SafeAddr(&sss_mut.peer_addr())
                                     );
                                     let vbuf = Vec::from(&buf[0..s]);
                                     let trueconn = if peerConnOpt.is_none() {
@@ -512,16 +519,16 @@ impl TcpForwarder {
                         log::debug!(
                             "TRY write {} bytes from {} to {}",
                             buf.len(),
-                            conn_mut.peer_addr().unwrap(),
-                            sss_mut.peer_addr().unwrap()
+                            SafeAddr(&conn_mut.peer_addr()),
+                            SafeAddr(&sss_mut.peer_addr())
                         );
                         match sss_mut.write(buf.as_slice()) {
                             Ok(s) => {
                                 log::debug!(
                                     "write {} bytes from {} to {}",
                                     s,
-                                    conn_mut.peer_addr().unwrap(),
-                                    sss_mut.peer_addr().unwrap()
+                                    SafeAddr(&conn_mut.peer_addr()),
+                                    SafeAddr(&sss_mut.peer_addr())
                                 );
                                 let bb = bufstat.0.remove(0);
                                 nwrited += s;
