@@ -131,12 +131,21 @@ impl TcpForwarder {
     }
 
     pub fn listen(self: &Self, closed: Arc<AtomicBool>) -> std::io::Result<()> {
-        let mut pollIns = Poll::new()?;
-        let mut listener = TcpListener::bind(self.local_addr)?;
+        let mut pollIns = Poll::new().unwrap();
+        let mut listener = match TcpListener::bind(self.local_addr) {
+            Ok(l) => l,
+            Err(e) => {
+                panic!(
+                    "fail to bind tcp://{}: make sure the address is not in use and you have permission to bind\n  {}",
+                    self.local_addr, e
+                );
+            }
+        };
         let listener_token = Token(0);
         pollIns
             .registry()
-            .register(&mut listener, listener_token, Interest::READABLE)?;
+            .register(&mut listener, listener_token, Interest::READABLE)
+            .unwrap();
         info!("listen at tcp://{}", listener.local_addr().unwrap());
 
         let capacity = if let Some(mx) = self.max_connections {

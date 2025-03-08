@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 extern crate portforwarder;
 
+use colored::Colorize;
 use portforwarder::forward_config::ForwardSessionConfig;
 use portforwarder::tcp_udp_forwarder::TcpUdpForwarder;
 use regex::Regex;
@@ -315,7 +316,7 @@ fn main() {
     }
 
     panic::set_hook(Box::new(|panic_info| {
-        eprintln!("Thread panicked: {}", panic_info);
+        eprintln!("Thread panicked: {}", panic_info.to_string().red());
         process::exit(1); // Exit the process with a non-zero status code
     }));
 

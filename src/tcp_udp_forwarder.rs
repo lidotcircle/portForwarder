@@ -22,10 +22,10 @@ impl TcpUdpForwarder {
         let mut udpi = None;
         let mut tcpei = None;
         if config.enable_tcp {
-            tcpei = Some(TcpForwarder::from(&config)?);
+            tcpei = Some(TcpForwarder::from(&config).unwrap());
         }
         if config.enable_udp {
-            udpi = Some(UdpForwarder::from(&config)?);
+            udpi = Some(UdpForwarder::from(&config).unwrap());
         }
 
         Ok(TcpUdpForwarder {

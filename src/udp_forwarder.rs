@@ -65,7 +65,7 @@ impl UdpForwarder {
     }
 
     pub fn listen(self: &UdpForwarder, closed: Arc<AtomicBool>) -> Result<(), Box<dyn Error>> {
-        let mut poll = Poll::new()?;
+        let mut poll = Poll::new().unwrap();
         let capacity = if let Some(mx) = self.max_connections {
             std::cmp::min(mx as usize, 1024)
         } else {
@@ -83,10 +83,20 @@ impl UdpForwarder {
         let mut token2dst: HashMap<Token, SocketAddr> = HashMap::new();
         let mut writeBackQueue: Vec<(SocketAddr, Vec<u8>)> = Vec::new();
 
-        let mut udpfd = UdpSocket::bind(self.bindAddr)?;
+        let mut udpfd = match UdpSocket::bind(self.bindAddr) {
+            Ok(l) => l,
+            Err(e) => {
+                panic!(
+                    "fail to bind udp://{}: make sure the address is not in use and you have permission to bind\n  {}",
+                    self.bindAddr, e
+                );
+            }
+        };
+
         poll.registry()
-            .register(&mut udpfd, t1, Interest::READABLE)?;
-        log::info!("listen incomming udp://{}", udpfd.local_addr()?);
+            .register(&mut udpfd, t1, Interest::READABLE)
+            .unwrap();
+        log::info!("listen incomming udp://{}", udpfd.local_addr().unwrap());
 
         let mut read_buf = vec![0; 1 << 16];
         let mut waiting_to_close: Vec<Token> = vec![];
@@ -155,7 +165,9 @@ impl UdpForwarder {
                                             }
                                             info!("create session, new message from {}", end);
 
-                                            let new_socket = UdpSocket::bind("0.0.0.0:0".parse()?)?;
+                                            let new_socket =
+                                                UdpSocket::bind("0.0.0.0:0".parse().unwrap())
+                                                    .unwrap();
                                             let t = next(&mut tx);
                                             addr2token.insert(end, t);
                                             token2addr.insert(t, end);
@@ -164,11 +176,13 @@ impl UdpForwarder {
                                             life2token.insert(now, t);
                                             now += 1;
 
-                                            poll.registry().register(
-                                                token2socket.get_mut(&t).unwrap(),
-                                                t,
-                                                Interest::READABLE,
-                                            )?;
+                                            poll.registry()
+                                                .register(
+                                                    token2socket.get_mut(&t).unwrap(),
+                                                    t,
+                                                    Interest::READABLE,
+                                                )
+                                                .unwrap();
                                         }
 
                                         let t = addr2token.get(&end).unwrap().clone();
