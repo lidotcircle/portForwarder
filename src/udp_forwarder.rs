@@ -1,6 +1,7 @@
 extern crate mio;
 
 use log::info;
+use queues::*;
 use std::cmp;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -81,7 +82,7 @@ impl UdpForwarder {
         let mut life2token: BTreeMap<u128, Token> = BTreeMap::new();
         let mut token2life: HashMap<Token, u128> = HashMap::new();
         let mut token2dst: HashMap<Token, SocketAddr> = HashMap::new();
-        let mut writeBackQueue: Vec<(SocketAddr, Vec<u8>)> = Vec::new();
+        let mut writeBackQueue: Queue<(SocketAddr, Vec<u8>)> = Queue::new();
 
         let mut udpfd = match UdpSocket::bind(self.bindAddr) {
             Ok(l) => l,
@@ -153,6 +154,7 @@ impl UdpForwarder {
                                             continue;
                                         }
 
+                                        log::debug!("listen: read {} bytes from {}", size, end);
                                         if addr2token.get(&end).is_none() {
                                             if let Some(mx) = self.max_connections {
                                                 if addr2token.len() as u64 >= mx {
@@ -208,12 +210,19 @@ impl UdpForwarder {
                             }
                         }
                         if event.is_writable() {
-                            assert!(writeBackQueue.len() > 0);
+                            assert!(writeBackQueue.size() > 0);
                             let mut cont = true;
-                            while writeBackQueue.len() > 0 && cont {
-                                let (addr, buf) = writeBackQueue.remove(0);
+                            while writeBackQueue.size() > 0 && cont {
+                                let (addr, buf) = writeBackQueue.remove().unwrap();
                                 match udpfd.send_to(&buf, addr) {
-                                    Ok(_) => {}
+                                    Ok(n) => {
+                                        log::debug!(
+                                            "send back {}/{n} bytes to {}, remain {}",
+                                            buf.len(),
+                                            addr,
+                                            writeBackQueue.size()
+                                        );
+                                    }
                                     Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                                         cont = false;
                                     }
@@ -221,7 +230,7 @@ impl UdpForwarder {
                                 }
                             }
 
-                            if writeBackQueue.is_empty() {
+                            if writeBackQueue.size() == 0 {
                                 reset_readable(&mut poll, &mut udpfd, &t1);
                             }
                         }
@@ -232,13 +241,21 @@ impl UdpForwarder {
                         if event.is_readable() {
                             let mut cont = true;
                             while cont {
-                                match sock.recv(&mut read_buf) {
-                                    Ok(size) if size > 0 => {
+                                match sock.recv_from(&mut read_buf) {
+                                    Ok((size, peerAddr)) if size > 0 => {
                                         let addr = token2addr.get(&token).unwrap().clone();
-                                        if writeBackQueue.is_empty() {
+                                        log::debug!(
+                                            "midpoint {}: read {} bytes from {}",
+                                            sock.local_addr().unwrap(),
+                                            size,
+                                            peerAddr
+                                        );
+                                        if writeBackQueue.size() == 0 {
                                             reset_readable_writable(&mut poll, &mut udpfd, &t1);
                                         }
-                                        writeBackQueue.push((addr, Vec::from(&read_buf[0..size])));
+                                        writeBackQueue
+                                            .add((addr, Vec::from(&read_buf[0..size])))
+                                            .unwrap();
 
                                         let oldLife = token2life.get(&token).unwrap();
                                         life2token.remove(oldLife);
@@ -268,12 +285,28 @@ impl UdpForwarder {
                                 let dst = if token2dst.contains_key(&token) {
                                     Some(*token2dst.get(&token).unwrap())
                                 } else {
-                                    self.plugin
-                                        .decideTarget(&buf, *token2addr.get(&token).unwrap())
+                                    let target = self
+                                        .plugin
+                                        .decideTarget(&buf, *token2addr.get(&token).unwrap());
+                                    if target.is_some() {
+                                        log::debug!(
+                                            "forward udp packet from {} to {}",
+                                            token2addr.get(&token).unwrap(),
+                                            target.unwrap()
+                                        );
+                                        token2dst.insert(token, target.unwrap());
+                                    }
+                                    target
                                 };
                                 match dst {
                                     Some(remote) => match sock.send_to(&buf, remote) {
                                         Ok(s) => {
+                                            log::debug!(
+                                                "sent {} bytes to {}, data packet come from {}",
+                                                s,
+                                                remote,
+                                                token2addr.get(&token).unwrap()
+                                            );
                                             nwritten += s;
                                         }
                                         Err(err) if err.kind() == io::ErrorKind::WouldBlock => {

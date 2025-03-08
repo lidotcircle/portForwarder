@@ -1,11 +1,15 @@
 use mio::net::UdpSocket;
 use mio::{Events, Interest, Poll, Token};
+use ntest::timeout;
 use portforwarder::forward_config::ForwardSessionConfig;
 use portforwarder::udp_forwarder::UdpForwarder;
 use rand::Rng;
 use std::net::ToSocketAddrs;
 use std::sync::{Arc, atomic::AtomicBool};
 use std::time::Duration;
+
+static SEND_FINISHED: std::sync::LazyLock<Arc<AtomicBool>> =
+    std::sync::LazyLock::new(|| Arc::new(AtomicBool::new(false)));
 
 fn udp_sender<T: ToSocketAddrs>(addr: T) {
     // Create a UDP socket and bind it to a random local port
@@ -35,8 +39,8 @@ fn udp_sender<T: ToSocketAddrs>(addr: T) {
 
     let target_bytes = RECIEVE_BUFSIZE * 100;
     let mut finish_bytes = 0;
+    let mut send_bytes = 0;
     let mut events = Events::with_capacity(1024);
-    let mut write_to_socket = true;
     while finish_bytes < target_bytes {
         poll.poll(&mut events, Some(Duration::from_secs(1)))
             .expect("Failed to poll events");
@@ -45,43 +49,63 @@ fn udp_sender<T: ToSocketAddrs>(addr: T) {
             match event.token() {
                 Token(0) => {
                     if event.is_readable() {
-                        let mut response_buffer = [0; RECIEVE_BUFSIZE];
-                        let (num_bytes, _) = socket
-                            .recv_from(&mut response_buffer)
-                            .expect("Failed to receive UDP packet");
-                        if num_bytes > 0 {
-                            assert!(buf_storage.len() >= num_bytes);
-                            assert_eq!(&buf_storage[0..num_bytes], &response_buffer[0..num_bytes]);
-                            buf_storage.drain(0..num_bytes);
-                            finish_bytes += num_bytes;
+                        loop {
+                            let mut response_buffer = [0; RECIEVE_BUFSIZE];
+                            match socket.recv_from(&mut response_buffer) {
+                                Ok((num_bytes, _)) => {
+                                    if num_bytes > 0 {
+                                        assert!(buf_storage.len() >= num_bytes);
+                                        assert_eq!(
+                                            &buf_storage[0..num_bytes],
+                                            &response_buffer[0..num_bytes]
+                                        );
+                                        buf_storage.drain(0..num_bytes);
+                                        finish_bytes += num_bytes;
+                                        println!(
+                                            "udpClient: recieve {num_bytes} bytes, totalRecieved/target = {finish_bytes}/{target_bytes}"
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    if e.kind() == std::io::ErrorKind::WouldBlock {
+                                        break;
+                                    }
+                                    assert!(false);
+                                }
+                            }
                         }
-                        write_to_socket = buf_storage.is_empty();
                     }
 
-                    if event.is_writable() && write_to_socket {
+                    if event.is_writable() && send_bytes < target_bytes {
                         rng.fill(&mut buffer[..]);
                         let s = socket
                             .send_to(&buffer[..], server_addr)
                             .expect("Failed to send UDP packet");
+                        println!("udpClient: sent {} bytes", s);
                         buf_storage.append(&mut buffer.clone()[0..s].to_vec());
+                        send_bytes += s;
                     }
                 }
                 _ => unreachable!(),
             }
         }
     }
+    println!("sender has completed his work!!!");
+    SEND_FINISHED.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
 fn udp_echo<T: ToSocketAddrs>(listen_addr: T) {
     let addr = listen_addr.to_socket_addrs().unwrap().next().unwrap();
     let socket = UdpSocket::bind(addr).expect("Failed to bind UDP socket");
+    let mut recieved_bytes = 0;
 
-    loop {
+    while SEND_FINISHED.load(std::sync::atomic::Ordering::SeqCst) == false {
         // Create a buffer to store the received data
         let mut buffer = [0; 1024];
 
         let kk = socket.recv_from(&mut buffer);
         if kk.is_err() {
+            std::thread::sleep(std::time::Duration::from_millis(5));
             continue;
         }
         // Receive data from the socket
@@ -89,16 +113,22 @@ fn udp_echo<T: ToSocketAddrs>(listen_addr: T) {
         if num_bytes == 0 {
             continue;
         }
+        recieved_bytes += num_bytes;
 
         // Send the received buffer back to the client
-        let _ = socket
+        println!(
+            "udpEchoServer: Received {} bytes from {}, total = {recieved_bytes}",
+            num_bytes, client_addr
+        );
+        let n = socket
             .send_to(&buffer[..num_bytes], client_addr)
             .expect("Failed to send UDP packet");
+        assert_eq!(n, num_bytes);
+        println!("udpEchoServer: send {n} bytes");
     }
 }
 
-#[test]
-fn test_udp_forwader() {
+fn run_udp_forwarder() {
     let remote_map: Vec<(String, String)> = vec![(".*".to_string(), "localhost:32345".to_string())];
     let config = ForwardSessionConfig {
         local: "localhost:33833",
@@ -112,6 +142,20 @@ fn test_udp_forwader() {
     let forwarder_wrap = UdpForwarder::from(&config);
     assert!(forwarder_wrap.is_ok());
     let forwarder = forwarder_wrap.unwrap();
+    let result = forwarder.listen(SEND_FINISHED.clone());
+    assert!(result.is_ok());
+}
+
+#[test]
+#[timeout(8000)]
+fn test_udp_forwader() {
+    env_logger::init_from_env(
+        env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "debug"),
+    );
+
+    let fd = std::thread::spawn(|| {
+        run_udp_forwarder();
+    });
     let h1 = std::thread::spawn(|| {
         udp_echo("localhost:32345");
     });
@@ -119,8 +163,8 @@ fn test_udp_forwader() {
     let h2 = std::thread::spawn(|| {
         udp_sender("localhost:33833");
     });
-    let result = forwarder.listen(Arc::new(AtomicBool::from(false)));
-    assert!(result.is_ok());
     h2.join().unwrap();
     h1.join().unwrap();
+    fd.join().unwrap();
+    assert!(SEND_FINISHED.load(std::sync::atomic::Ordering::SeqCst));
 }
