@@ -167,9 +167,12 @@ impl UdpForwarder {
                                             }
                                             info!("create session, new message from {}", end);
 
-                                            let new_socket =
+                                            let new_socket = if self.bindAddr.is_ipv4() {
                                                 UdpSocket::bind("0.0.0.0:0".parse().unwrap())
-                                                    .unwrap();
+                                                    .unwrap()
+                                            } else {
+                                                UdpSocket::bind("[::]:0".parse().unwrap()).unwrap()
+                                            };
                                             let t = next(&mut tx);
                                             addr2token.insert(end, t);
                                             token2addr.insert(t, end);

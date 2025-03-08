@@ -10,7 +10,7 @@ use std::time::Duration;
 
 fn udp_sender<T: ToSocketAddrs>(addr: T, finished: Arc<AtomicBool>) {
     // Create a UDP socket and bind it to a random local port
-    let mut socket = UdpSocket::bind("0.0.0.0:0".to_socket_addrs().unwrap().next().unwrap())
+    let mut socket = UdpSocket::bind("localhost:0".to_socket_addrs().unwrap().next().unwrap())
         .expect("Failed to bind UDP socket");
 
     // Resolve the server address
@@ -75,9 +75,9 @@ fn udp_sender<T: ToSocketAddrs>(addr: T, finished: Arc<AtomicBool>) {
 
                     if event.is_writable() && send_bytes < target_bytes {
                         rng.fill(&mut buffer[..]);
-                        let s = socket
-                            .send_to(&buffer[..], server_addr)
-                            .expect("Failed to send UDP packet");
+                        let mut ermsg = String::from("Failed to send UDP packet, addr = ");
+                        ermsg.push_str(format!("{:?}", server_addr).as_str());
+                        let s = socket.send_to(&buffer[..], server_addr).expect(&ermsg);
                         println!("udpClient: sent {} bytes", s);
                         buf_storage.append(&mut buffer.clone()[0..s].to_vec());
                         send_bytes += s;
