@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::{Arc, atomic::AtomicBool};
 use std::cell::RefCell;
-use std::io::{Write, Read};
+use std::io::{Write, Read, ErrorKind};
 use std::time;
 use log::info;
 use mio::{Interest,Token,Poll,Events};
@@ -122,6 +122,11 @@ impl TcpForwarder {
                 (Token(tk.0 - 1), tk)
             };
 
+            // prevent double clear
+            if !token2stream.contains_key(&t1) {
+                return;
+            }
+
             info!("close connection from {}, remaining {}", token2stream.get(&t1).unwrap().1, token2stream.len() -1);
 
             clear_readable(pollIns, &mut token2stream.get(&t1).unwrap().0.borrow_mut(), &t1, token2stat);
@@ -224,15 +229,22 @@ impl TcpForwarder {
                     (conn, tk2, Some(stream))
                 };
 
+                let mut peerConnOpt = conn.clone();
+
                 if event.is_readable() {
                     let mut buf = [0; 1<<16];
+                    let mut n = 0;
+                    loop {
                     let mut sss_mut = sss.borrow_mut();
                     match sss_mut.read(&mut buf[..]) {
                         Ok(s) => {
+                            if n > 0 && s == 0 {
+                                break;
+                            }
                             if s == 0 {
                                 if token2buffer.get(&tk2).is_none() {
-                                    if conn.is_some() {
-                                        let conn_c = conn.as_ref().unwrap().clone();
+                                    if peerConnOpt.is_some() {
+                                        let conn_c = peerConnOpt.as_ref().unwrap().clone();
                                         let mut conn_mut = conn_c.borrow_mut();
                                         conn_mut.shutdown(Shutdown::Write).unwrap_or(());
                                         if alreadyShutdown.get(&tk).is_some() {
@@ -240,7 +252,7 @@ impl TcpForwarder {
                                             drop(conn_mut);
                                             removeConn(tk,  &mut pollIns, &mut token2stream, &mut token2stat, &mut token2connss, &mut token2buffer,
                                                        &mut shutdownMe, &mut alreadyShutdown);
-                                            continue;
+                                            break;
                                         } else {
                                             clear_writable(&mut pollIns, &mut conn_mut, &tk2, &mut token2stat);
                                             alreadyShutdown.insert(tk2);
@@ -249,15 +261,15 @@ impl TcpForwarder {
                                         drop(sss_mut);
                                         removeConn(tk,  &mut pollIns, &mut token2stream, &mut token2stat, &mut token2connss, &mut token2buffer,
                                                    &mut shutdownMe, &mut alreadyShutdown);
-                                        continue;
-
+                                        break;
                                     }
                                 } else {
                                     shutdownMe.insert(tk2);
                                 }
                             } else {
+                                log::debug!("read buffer[{}] from {}", s, sss_mut.peer_addr().unwrap());
                                 let vbuf = Vec::from(&buf[0..s]);
-                                let trueconn = if conn.is_none() {
+                                let trueconn = if peerConnOpt.is_none() {
                                     match  self.plugin.decideTarget(&vbuf, sss_mut.peer_addr().unwrap()) {
                                         Some(addr) => {
                                             match TcpStream::connect(addr) {
@@ -265,6 +277,7 @@ impl TcpForwarder {
                                                     pollIns.registry().register(&mut ccc, tk2, Interest::READABLE).unwrap();
                                                     token2connss.insert(tk2, Rc::new(RefCell::new(ccc)));
                                                     token2stat.insert(tk2, Interest::READABLE);
+                                                    peerConnOpt = Some(token2connss.get(&tk2).unwrap().clone());
                                                     info!("create connection to {}", addr);
                                                     Some(token2connss.get(&tk2).unwrap().clone())
                                                 },
@@ -277,7 +290,7 @@ impl TcpForwarder {
                                         None => None,
                                     }
                                 } else {
-                                    Some(conn.as_ref().unwrap().clone())
+                                    Some(peerConnOpt.as_ref().unwrap().clone())
                                 };
                                 if trueconn.is_none() {
                                     drop(sss_mut);
@@ -304,12 +317,17 @@ impl TcpForwarder {
                             }
                         },
                         Err(_e) => {
+                            if _e.kind() == ErrorKind::WouldBlock {
+                                    break;
+                            }
                             info!("close connection {}", _e);
                             drop(sss_mut);
                             removeConn(tk, &mut pollIns, &mut token2stream, &mut token2stat, &mut token2connss, &mut token2buffer, 
                                        &mut shutdownMe, &mut alreadyShutdown);
-                            continue;
+                            break;
                         }
+                    }
+                    n += 1;
                     }
                 }
 
@@ -323,10 +341,12 @@ impl TcpForwarder {
                     while !bufstat.0.is_empty() {
                         let buf = bufstat.0.first().unwrap();
                         let mut sss_mut = sss.borrow_mut();
-                        let connx = conn.as_ref().unwrap();
+                        let connx = peerConnOpt.as_ref().unwrap();
                         let mut conn_mut = connx.borrow_mut();
+                        log::debug!("TRY write {} bytes from {} to {}", buf.len(), conn_mut.peer_addr().unwrap(), sss_mut.peer_addr().unwrap());
                         match sss_mut.write(buf.as_slice()) {
                             Ok(s) => {
+                                log::debug!("write {} bytes from {} to {}", s, conn_mut.peer_addr().unwrap(), sss_mut.peer_addr().unwrap());
                                 let bb = bufstat.0.remove(0);
                                 nwrited += s;
                                 if s < bb.len() {

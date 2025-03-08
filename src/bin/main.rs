@@ -5,7 +5,10 @@ use portforwarder::tcp_udp_forwarder::TcpUdpForwarder;
 use portforwarder::forward_config::ForwardSessionConfig;
 use regex::Regex;
 use std::fs;
+use std::sync::atomic::{Ordering, AtomicBool};
 use std::sync::{Arc, Condvar, Mutex};
+use std::panic;
+use std::process;
 use yaml_rust::{YamlLoader, Yaml};
 
 
@@ -297,10 +300,20 @@ fn main() {
         );
     }
 
+    panic::set_hook(Box::new(|panic_info| {
+        eprintln!("Thread panicked: {}", panic_info);
+        process::exit(1); // Exit the process with a non-zero status code
+    }));
+
     let mut handlers = vec![];
     let sync_pair = Arc::new((Mutex::new(false), Condvar::new()));
     let pair2 = sync_pair.clone();
+    let ctrlcPressed = AtomicBool::new(false);
     ctrlc::set_handler(move || {
+        if ctrlcPressed.load(Ordering::SeqCst) {
+            std::process::exit(0);
+        }
+        ctrlcPressed.store(true, Ordering::SeqCst);
         println!("ctrl-c pressed, exiting ...");
         let (lock, cvar) = &*pair2;
         let mut close = lock.lock().unwrap();

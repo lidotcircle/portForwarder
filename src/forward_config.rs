@@ -1,7 +1,7 @@
 use std::net::ToSocketAddrs;
 
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ForwardSessionConfig<T: ToSocketAddrs> {
     pub local: T,
     pub remoteMap: Vec<(String,String)>,

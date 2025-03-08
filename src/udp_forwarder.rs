@@ -74,6 +74,7 @@ impl UdpForwarder {
         let mut udpfd = UdpSocket::bind(self.bindAddr)?;
         poll.registry().
             register(&mut udpfd, t1, Interest::READABLE)?;
+        log::info!("listen incomming udp://{}", udpfd.local_addr()?);
 
         let mut read_buf = vec![0;1<<16];
         let mut waiting_to_close: Vec<Token> = vec![];
