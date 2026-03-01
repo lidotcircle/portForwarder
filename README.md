@@ -17,6 +17,7 @@ You can build this tool from source with `cargo install portForwarder` or downlo
 
 To run `portfd` with simple command line arguments, use the following syntax: `portfd <local-bind> <remote>`.
 In this case, you need to specify the listening address and the remote address.
+To run as a SOCKS5 server (CONNECT only), use: `portfd --socks5 <local-bind>`.
 For more advanced usage, `portfd` can be started with a configuration file that supports more complex rules. 
 Here's an example of a config file in YAML format:
 
@@ -38,6 +39,7 @@ forwarders:
       - pattern: .*
         remote: 192.168.100.46:23
     remote: <remote-address/127.0.0.1:2233>
+    tcp_mode: forward # Optional, support: forward, socks5
     enable_tcp: true # Default is true
     enable_udp: true # Default is true
     conn_bufsize: 2MB

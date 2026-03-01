@@ -1,7 +1,7 @@
 use mio::net::UdpSocket;
 use mio::{Events, Interest, Poll, Token};
 use ntest::timeout;
-use portforwarder::forward_config::ForwardSessionConfig;
+use portforwarder::forward_config::{ForwardSessionConfig, TcpMode};
 use portforwarder::udp_forwarder::UdpForwarder;
 use rand::Rng;
 use std::net::ToSocketAddrs;
@@ -135,6 +135,7 @@ fn run_udp_forwarder(finished: Arc<AtomicBool>) {
         conn_bufsize: 1024 * 1024,
         allow_nets: ["127.0.0.1/24".to_string(), "::1/128".to_string()].to_vec(),
         max_connections: 10,
+        tcp_mode: TcpMode::Forward,
     };
     let forwarder_wrap = UdpForwarder::from(&config);
     assert!(forwarder_wrap.is_ok());

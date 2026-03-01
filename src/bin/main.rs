@@ -2,7 +2,7 @@
 extern crate portforwarder;
 
 use colored::Colorize;
-use portforwarder::forward_config::ForwardSessionConfig;
+use portforwarder::forward_config::{ForwardSessionConfig, TcpMode};
 use portforwarder::tcp_udp_forwarder::TcpUdpForwarder;
 use regex::Regex;
 use std::fs;
@@ -17,6 +17,7 @@ fn usage() {
     println!(
         "usage:
     {} [-htu] <bind-address> <forward-address>
+    {} [--socks5] <bind-address>
     {} -c <yaml-config-file>
 
     -t    disable tcp
@@ -26,9 +27,11 @@ fn usage() {
     -w    network whitelist, eg. 127.0.0.1/24
     -m    max connections
     -c    config file (a yaml file)
+    --socks5  run tcp listener as a SOCKS5 server (CONNECT only)
+              when enabled, <forward-address> is not required
     -e    show an example of config file
     -h    show help",
-        args[0], args[0]
+        args[0], args[0], args[0]
     );
 }
 
@@ -51,6 +54,7 @@ fn print_example_of_config_file() {
       - pattern: .*
         remote: 192.168.100.46:23
     remote: <remote-address/127.0.0.1:2233>
+    tcp_mode: forward # support: forward, socks5
     enable_tcp: true # default is true
     enable_udp: true # default is true
     conn_bufsize: 2MB
@@ -117,6 +121,11 @@ impl FromYaml for ForwardSessionConfig<String> {
         };
         let enable_tcp = yaml["enable_tcp"].as_bool().unwrap_or(true);
         let enable_udp = yaml["enable_udp"].as_bool().unwrap_or(true);
+        let tcp_mode = match yaml["tcp_mode"].as_str().unwrap_or("forward") {
+            "forward" => TcpMode::Forward,
+            "socks5" => TcpMode::Socks5Server,
+            _ => return Err("invalid tcp_mode, support values: forward, socks5"),
+        };
         let allow_nets_opt = yaml["allow_nets"].as_vec();
         let mut allow_nets = vec![];
         let conn_bufsize =
@@ -161,6 +170,7 @@ impl FromYaml for ForwardSessionConfig<String> {
             allow_nets,
             max_connections,
             conn_bufsize,
+            tcp_mode,
         })
     }
 }
@@ -174,6 +184,7 @@ fn main() {
     let mut enable_tcp = true;
     let mut enable_udp = true;
     let mut max_connections = -1;
+    let mut tcp_mode = TcpMode::Forward;
     let mut args: Vec<String> = std::env::args().collect();
     let mut config_file: Option<String> = None;
     let mut whitelist: Vec<String> = vec![];
@@ -240,6 +251,10 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+            "--socks5" => {
+                tcp_mode = TcpMode::Socks5Server;
+                enable_udp = false;
+            }
             _ => {
                 if valid_ipv4_port.is_match(s) {
                     if bind_addr.is_none() {
@@ -297,13 +312,15 @@ fn main() {
             std::process::exit(1);
         }
     } else {
-        if bind_addr.is_none() || forward_addr.is_none() {
+        if bind_addr.is_none() || (forward_addr.is_none() && tcp_mode == TcpMode::Forward) {
             usage();
             std::process::exit(1);
         }
 
         let mut remoteMap: Vec<(String, String)> = vec![];
-        remoteMap.push((".*".to_string(), forward_addr.unwrap()));
+        if tcp_mode == TcpMode::Forward {
+            remoteMap.push((".*".to_string(), forward_addr.unwrap()));
+        }
         forwarder_configs.push(ForwardSessionConfig {
             local: bind_addr.unwrap(),
             remoteMap,
@@ -312,6 +329,7 @@ fn main() {
             allow_nets: whitelist,
             max_connections,
             conn_bufsize,
+            tcp_mode,
         });
     }
 

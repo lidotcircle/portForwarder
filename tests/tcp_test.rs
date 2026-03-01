@@ -1,7 +1,7 @@
 use mio::net::{TcpListener, TcpStream};
 use mio::{Events, Interest, Poll, Token};
 use ntest::timeout;
-use portforwarder::forward_config::ForwardSessionConfig;
+use portforwarder::forward_config::{ForwardSessionConfig, TcpMode};
 use portforwarder::tcp_forwarder::TcpForwarder;
 use rand::Rng;
 use std::cell::RefCell;
@@ -213,6 +213,7 @@ fn run_tcp_forwarder(finished: Arc<AtomicBool>) {
         conn_bufsize: 1024 * 1024,
         allow_nets: vec!["127.0.0.1/24".to_string(), "::1/128".to_string()],
         max_connections: 10,
+        tcp_mode: TcpMode::Forward,
     };
     let forwarder = TcpForwarder::from(&config).unwrap();
     forwarder.listen(finished).unwrap();
