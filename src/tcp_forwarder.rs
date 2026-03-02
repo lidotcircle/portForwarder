@@ -1349,6 +1349,15 @@ impl TcpForwarder {
                             match sess.client.read(&mut buf) {
                                 Ok(0) => {
                                     sess.client_eof = true;
+                                    if sess.c2r_queue.is_empty()
+                                        && !sess.remote_write_shutdown
+                                        && sess.remote.is_some()
+                                    {
+                                        if let Some(remote) = sess.remote.as_mut() {
+                                            let _ = remote.shutdown(Shutdown::Write);
+                                        }
+                                        sess.remote_write_shutdown = true;
+                                    }
                                     if sess.remote_eof && sess.r2c_queue.is_empty() {
                                         sess.close_reason = Some("client closed".to_string());
                                         to_close.push(client_token);
