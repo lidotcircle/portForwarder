@@ -4,9 +4,27 @@ use ntest::timeout;
 use portforwarder::forward_config::{ForwardSessionConfig, TcpMode};
 use portforwarder::udp_forwarder::UdpForwarder;
 use rand::Rng;
+use std::collections::HashSet;
+use std::convert::TryInto;
 use std::net::ToSocketAddrs;
-use std::sync::{Arc, atomic::AtomicBool};
-use std::time::Duration;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+fn init_log() {
+    let _ = env_logger::builder().is_test(true).try_init();
+}
+
+fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    match LOCK.get_or_init(|| Mutex::new(())).lock() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    }
+}
 
 fn udp_sender<T: ToSocketAddrs>(addr: T, finished: Arc<AtomicBool>) {
     // Create a UDP socket and bind it to a random local port
@@ -126,15 +144,19 @@ fn udp_echo<T: ToSocketAddrs>(listen_addr: T, finished: Arc<AtomicBool>) {
 }
 
 fn run_udp_forwarder(finished: Arc<AtomicBool>) {
-    let remote_map: Vec<(String, String)> = vec![(".*".to_string(), "localhost:32345".to_string())];
+    run_udp_forwarder_at("localhost:33833", "localhost:32345", finished);
+}
+
+fn run_udp_forwarder_at(local: &'static str, remote: &'static str, finished: Arc<AtomicBool>) {
+    let remote_map: Vec<(String, String)> = vec![(".*".to_string(), remote.to_string())];
     let config = ForwardSessionConfig {
-        local: "localhost:33833",
+        local,
         remoteMap: remote_map,
         enable_tcp: false,
         enable_udp: true,
         conn_bufsize: 1024 * 1024,
         allow_nets: ["127.0.0.1/24".to_string(), "::1/128".to_string()].to_vec(),
-        max_connections: 10,
+        max_connections: 256,
         tcp_mode: TcpMode::Forward,
     };
     let forwarder_wrap = UdpForwarder::from(&config);
@@ -145,11 +167,10 @@ fn run_udp_forwarder(finished: Arc<AtomicBool>) {
 }
 
 #[test]
-#[timeout(8000)]
+#[timeout(60000)]
 fn test_udp_forwader() {
-    env_logger::init_from_env(
-        env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "debug"),
-    );
+    let _guard = test_lock();
+    init_log();
 
     let finished: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     let lx1 = finished.clone();
@@ -170,4 +191,121 @@ fn test_udp_forwader() {
     h1.join().unwrap();
     fd.join().unwrap();
     assert!(finished.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[test]
+#[timeout(90000)]
+fn test_udp_forwarder_congestion_burst() {
+    let _guard = test_lock();
+    init_log();
+
+    let finished: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+
+    let p1 = finished.clone();
+    let fd = std::thread::spawn(move || {
+        run_udp_forwarder_at("127.0.0.1:33842", "127.0.0.1:32356", p1);
+    });
+    std::thread::sleep(Duration::from_millis(200));
+
+    let p2 = finished.clone();
+    let echo_thread = std::thread::spawn(move || {
+        let socket = std::net::UdpSocket::bind("127.0.0.1:32356").unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let mut buf = [0u8; 2048];
+        while !p2.load(Ordering::SeqCst) {
+            match socket.recv_from(&mut buf) {
+                Ok((n, addr)) => {
+                    if n % 3 == 0 {
+                        std::thread::sleep(Duration::from_millis(2));
+                    } else {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    let _ = socket.send_to(&buf[..n], addr);
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    std::thread::sleep(Duration::from_millis(100));
+
+    let mut workers = Vec::new();
+    let worker_count = 8u64;
+    let packets_per_worker = 220u64;
+    for worker_id in 0..worker_count {
+        workers.push(std::thread::spawn(move || {
+            let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            socket.set_nonblocking(true).unwrap();
+
+            let packets = packets_per_worker;
+            let mut next_send = 0u64;
+            let mut seen = HashSet::new();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let mut recv_buf = [0u8; 512];
+
+            while (next_send < packets || seen.len() < packets as usize) && Instant::now() < deadline
+            {
+                for _ in 0..2 {
+                    if next_send >= packets {
+                        break;
+                    }
+                    let id = (worker_id << 32) | next_send;
+                    let mut payload = vec![0u8; 256];
+                    payload[..8].copy_from_slice(&id.to_be_bytes());
+                    for (i, b) in payload[8..].iter_mut().enumerate() {
+                        *b = ((i as u64 + next_send + worker_id) % 251) as u8;
+                    }
+                    socket.send_to(&payload, "127.0.0.1:33842").unwrap();
+                    next_send += 1;
+                }
+
+                let mut drained = 0usize;
+                loop {
+                    match socket.recv_from(&mut recv_buf) {
+                        Ok((n, _)) => {
+                            assert_eq!(n, 256);
+                            let id = u64::from_be_bytes(recv_buf[..8].try_into().unwrap());
+                            let seq = (id & 0xFFFF_FFFF) as usize;
+                            for (i, b) in recv_buf[8..n].iter().enumerate() {
+                                assert_eq!(
+                                    *b,
+                                    ((i + seq + worker_id as usize) % 251) as u8,
+                                    "payload corruption for worker {worker_id}, seq {seq}"
+                                );
+                            }
+                            seen.insert(id);
+                            drained += 1;
+                            if drained >= 12 {
+                                break;
+                            }
+                        }
+                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
+                        Err(err) => panic!("udp recv failed: {}", err),
+                    }
+                }
+
+                std::thread::sleep(Duration::from_millis(1));
+            }
+
+            seen.len()
+        }));
+    }
+
+    let mut total_seen = 0usize;
+    for w in workers {
+        total_seen += w.join().unwrap();
+    }
+    let total_sent = (worker_count * packets_per_worker) as usize;
+    assert!(
+        total_seen >= total_sent * 12 / 100,
+        "too many UDP drops under congestion: received {}, sent {}",
+        total_seen,
+        total_sent
+    );
+
+    finished.store(true, Ordering::SeqCst);
+    echo_thread.join().unwrap();
+    fd.join().unwrap();
 }

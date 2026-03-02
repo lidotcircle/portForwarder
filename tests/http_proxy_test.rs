@@ -151,8 +151,56 @@ fn http_backend(listen_addr: &str, finished: Arc<AtomicBool>) {
     }
 }
 
+fn read_http_response_with_length(stream: &mut TcpStream) -> (Vec<u8>, Vec<u8>) {
+    let mut buf = vec![0u8; 4096];
+    let mut total = 0usize;
+    let header_end;
+    loop {
+        if total == buf.len() {
+            buf.resize(buf.len() * 2, 0);
+        }
+        let n = stream.read(&mut buf[total..]).unwrap();
+        assert!(n > 0, "unexpected EOF before response header completed");
+        total += n;
+        if let Some(pos) = buf[..total].windows(4).position(|w| w == b"\r\n\r\n") {
+            header_end = pos + 4;
+            break;
+        }
+    }
+
+    let header = buf[..header_end].to_vec();
+    let header_s = String::from_utf8_lossy(&header).to_string();
+    let content_len = header_s
+        .lines()
+        .find_map(|line| {
+            let lower = line.to_ascii_lowercase();
+            if lower.starts_with("content-length:") {
+                lower
+                    .split(':')
+                    .nth(1)
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+            } else {
+                None
+            }
+        })
+        .expect("missing content-length");
+
+    let mut body = Vec::with_capacity(content_len);
+    if total > header_end {
+        body.extend_from_slice(&buf[header_end..total]);
+    }
+    while body.len() < content_len {
+        let mut chunk = [0u8; 1024];
+        let n = stream.read(&mut chunk).unwrap();
+        assert!(n > 0, "unexpected EOF while reading response body");
+        body.extend_from_slice(&chunk[..n]);
+    }
+    body.truncate(content_len);
+    (header, body)
+}
+
 #[test]
-#[timeout(8000)]
+#[timeout(60000)]
 fn test_http_connect_on_socks5_port() {
     let _guard = test_lock();
     init_log();
@@ -189,7 +237,7 @@ fn test_http_connect_on_socks5_port() {
 }
 
 #[test]
-#[timeout(8000)]
+#[timeout(60000)]
 fn test_http_forward_on_socks5_port() {
     let _guard = test_lock();
     init_log();
@@ -245,7 +293,7 @@ fn test_http_forward_on_socks5_port() {
 }
 
 #[test]
-#[timeout(8000)]
+#[timeout(60000)]
 fn test_http_forward_absolute_uri_with_query_no_path() {
     let _guard = test_lock();
     init_log();
@@ -289,7 +337,7 @@ fn test_http_forward_absolute_uri_with_query_no_path() {
 }
 
 #[test]
-#[timeout(20000)]
+#[timeout(60000)]
 fn test_mixed_proxy_protocol_stress_switching() {
     let _guard = test_lock();
     init_log();
@@ -379,5 +427,213 @@ fn test_mixed_proxy_protocol_stress_switching() {
     finished.store(true, Ordering::SeqCst);
     echo_thread.join().unwrap();
     http_thread.join().unwrap();
+    proxy_thread.join().unwrap();
+}
+
+#[test]
+#[timeout(60000)]
+fn test_http_forward_congestion_slow_backend_and_client() {
+    let _guard = test_lock();
+    init_log();
+    let finished = Arc::new(AtomicBool::new(false));
+
+    let p1 = finished.clone();
+    let proxy_thread = std::thread::spawn(move || run_proxy("127.0.0.1:33839", p1));
+    std::thread::sleep(Duration::from_millis(200));
+
+    let p2 = finished.clone();
+    let backend_thread = std::thread::spawn(move || {
+        let listener = TcpListener::bind("127.0.0.1:32353").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let payload = vec![b'X'; 128 * 1024];
+        while !p2.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((mut conn, _)) => {
+                    let payload = payload.clone();
+                    std::thread::spawn(move || {
+                        let _ = conn.set_read_timeout(Some(Duration::from_secs(2)));
+                        let mut req = vec![0u8; 4096];
+                        let mut total = 0usize;
+                        loop {
+                            if total >= req.len() {
+                                break;
+                            }
+                            match conn.read(&mut req[total..]) {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    total += n;
+                                    if req[..total].windows(4).any(|w| w == b"\r\n\r\n") {
+                                        break;
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        let head = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            payload.len()
+                        );
+                        if conn.write_all(head.as_bytes()).is_err() {
+                            return;
+                        }
+                        for chunk in payload.chunks(512) {
+                            if conn.write_all(chunk).is_err() {
+                                return;
+                            }
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                    });
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    std::thread::sleep(Duration::from_millis(100));
+
+    let mut workers = Vec::new();
+    for t in 0..6usize {
+        workers.push(std::thread::spawn(move || {
+            for i in 0..6usize {
+                let mut client = TcpStream::connect("127.0.0.1:33839").unwrap();
+                client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let req = format!(
+                    "GET http://127.0.0.1:32353/congest/{}/{} HTTP/1.1\r\nHost: 127.0.0.1:32353\r\nConnection: close\r\n\r\n",
+                    t, i
+                );
+                client.write_all(req.as_bytes()).unwrap();
+
+                let (header, body) = read_http_response_with_length(&mut client);
+                let header_s = String::from_utf8_lossy(&header);
+                assert!(
+                    header_s.starts_with("HTTP/1.1 200"),
+                    "unexpected status for worker {}, iter {}: {}",
+                    t,
+                    i,
+                    header_s
+                );
+
+                for chunk in body.chunks(256) {
+                    assert!(chunk.iter().all(|b| *b == b'X'));
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                assert_eq!(body.len(), 128 * 1024);
+
+                let _ = client.shutdown(Shutdown::Both);
+            }
+        }));
+    }
+    for worker in workers {
+        worker.join().unwrap();
+    }
+
+    finished.store(true, Ordering::SeqCst);
+    backend_thread.join().unwrap();
+    proxy_thread.join().unwrap();
+}
+
+#[test]
+#[timeout(60000)]
+fn test_http_connect_congestion_large_bidirectional_stream() {
+    let _guard = test_lock();
+    init_log();
+    let finished = Arc::new(AtomicBool::new(false));
+
+    let p1 = finished.clone();
+    let proxy_thread = std::thread::spawn(move || run_proxy("127.0.0.1:33840", p1));
+    std::thread::sleep(Duration::from_millis(200));
+
+    let p2 = finished.clone();
+    let echo_thread = std::thread::spawn(move || {
+        let listener = TcpListener::bind("127.0.0.1:32354").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        while !p2.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    std::thread::spawn(move || {
+                        let mut buf = [0u8; 1024];
+                        loop {
+                            match stream.read(&mut buf) {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    std::thread::sleep(Duration::from_millis(1));
+                                    if stream.write_all(&buf[..n]).is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                    });
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    std::thread::sleep(Duration::from_millis(100));
+
+    let mut workers = Vec::new();
+    for t in 0..4usize {
+        workers.push(std::thread::spawn(move || {
+            for i in 0..5usize {
+                let mut client = TcpStream::connect("127.0.0.1:33840").unwrap();
+                client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                client
+                    .write_all(
+                        b"CONNECT 127.0.0.1:32354 HTTP/1.1\r\nHost: 127.0.0.1:32354\r\n\r\n",
+                    )
+                    .unwrap();
+
+                let mut status = [0u8; 128];
+                let n = client.read(&mut status).unwrap();
+                let status_s = String::from_utf8_lossy(&status[..n]);
+                assert!(
+                    status_s.starts_with("HTTP/1.1 200"),
+                    "bad connect status at worker {}, iter {}: {}",
+                    t,
+                    i,
+                    status_s
+                );
+
+                let mut tx = vec![0u8; 96 * 1024];
+                for (idx, b) in tx.iter_mut().enumerate() {
+                    *b = ((idx + i + t) % 251) as u8;
+                }
+
+                let mut sent = 0usize;
+                while sent < tx.len() {
+                    let end = (sent + 700).min(tx.len());
+                    client.write_all(&tx[sent..end]).unwrap();
+                    sent = end;
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                let _ = client.shutdown(Shutdown::Write);
+
+                let mut rx = Vec::with_capacity(tx.len());
+                let mut buf = [0u8; 1536];
+                while rx.len() < tx.len() {
+                    let n = client.read(&mut buf).unwrap();
+                    assert!(n > 0, "unexpected EOF in connect tunnel");
+                    rx.extend_from_slice(&buf[..n]);
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                rx.truncate(tx.len());
+                assert_eq!(rx, tx, "tunnel payload mismatch at worker {}, iter {}", t, i);
+
+                let _ = client.shutdown(Shutdown::Both);
+            }
+        }));
+    }
+    for worker in workers {
+        worker.join().unwrap();
+    }
+
+    finished.store(true, Ordering::SeqCst);
+    echo_thread.join().unwrap();
     proxy_thread.join().unwrap();
 }

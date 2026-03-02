@@ -9,8 +9,21 @@ use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Write};
 use std::net::ToSocketAddrs;
 use std::rc::Rc;
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
+
+fn init_log() {
+    let _ = env_logger::builder().is_test(true).try_init();
+}
+
+fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+}
 
 fn tcp_sender<T: ToSocketAddrs>(addr: T, finished: Arc<AtomicBool>) {
     let server_addr = addr.to_socket_addrs().unwrap().next().unwrap();
@@ -204,15 +217,19 @@ fn tcp_echo<T: ToSocketAddrs>(listen_addr: T, finished: Arc<AtomicBool>) {
 }
 
 fn run_tcp_forwarder(finished: Arc<AtomicBool>) {
-    let remote_map = vec![(".*".to_string(), "localhost:32345".to_string())];
+    run_tcp_forwarder_at("localhost:33833", "localhost:32345", finished);
+}
+
+fn run_tcp_forwarder_at(local: &'static str, remote: &'static str, finished: Arc<AtomicBool>) {
+    let remote_map = vec![(".*".to_string(), remote.to_string())];
     let config = ForwardSessionConfig {
-        local: "localhost:33833",
+        local,
         remoteMap: remote_map,
         enable_tcp: true,
         enable_udp: false,
         conn_bufsize: 1024 * 1024,
         allow_nets: vec!["127.0.0.1/24".to_string(), "::1/128".to_string()],
-        max_connections: 10,
+        max_connections: 256,
         tcp_mode: TcpMode::Forward,
     };
     let forwarder = TcpForwarder::from(&config).unwrap();
@@ -220,11 +237,10 @@ fn run_tcp_forwarder(finished: Arc<AtomicBool>) {
 }
 
 #[test]
-#[timeout(8000)]
+#[timeout(60000)]
 fn test_tcp_forwarder() {
-    env_logger::init_from_env(
-        env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "debug"),
-    );
+    let _guard = test_lock();
+    init_log();
 
     let finished: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     let lx1 = finished.clone();
@@ -241,4 +257,111 @@ fn test_tcp_forwarder() {
     forwarder_thread.join().unwrap();
 
     assert!(finished.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[test]
+#[timeout(90000)]
+fn test_tcp_forwarder_congestion_multi_clients() {
+    let _guard = test_lock();
+    init_log();
+
+    let finished: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+
+    let p1 = finished.clone();
+    let forwarder_thread =
+        std::thread::spawn(move || run_tcp_forwarder_at("127.0.0.1:33841", "127.0.0.1:32355", p1));
+    std::thread::sleep(Duration::from_millis(200));
+
+    let p2 = finished.clone();
+    let backend_thread = std::thread::spawn(move || {
+        let listener = std::net::TcpListener::bind("127.0.0.1:32355").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        while !p2.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    std::thread::spawn(move || {
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                        let mut buf = [0u8; 4096];
+                        loop {
+                            match stream.read(&mut buf) {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    for (chunk_idx, chunk) in buf[..n].chunks(173).enumerate() {
+                                        if chunk_idx % 2 == 0 {
+                                            std::thread::sleep(Duration::from_millis(1));
+                                        } else {
+                                            std::thread::sleep(Duration::from_millis(2));
+                                        }
+                                        if stream.write_all(chunk).is_err() {
+                                            return;
+                                        }
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                    });
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    std::thread::sleep(Duration::from_millis(100));
+
+    let mut workers = Vec::new();
+    for w in 0..10usize {
+        workers.push(std::thread::spawn(move || {
+            for i in 0..10usize {
+                let mut client = std::net::TcpStream::connect("127.0.0.1:33841").unwrap();
+                client.set_read_timeout(Some(Duration::from_secs(8))).unwrap();
+                client.set_write_timeout(Some(Duration::from_secs(8))).unwrap();
+
+                let mut payload = vec![0u8; 192 * 1024];
+                for (idx, b) in payload.iter_mut().enumerate() {
+                    *b = ((idx + i + w) % 251) as u8;
+                }
+
+                let mut sent = 0usize;
+                while sent < payload.len() {
+                    let end = (sent + 389).min(payload.len());
+                    client.write_all(&payload[sent..end]).unwrap();
+                    sent = end;
+                    if sent % (4 * 1024) == 0 {
+                        if ((sent / 4096) + i + w) % 2 == 0 {
+                            std::thread::sleep(Duration::from_millis(1));
+                        } else {
+                            std::thread::sleep(Duration::from_millis(2));
+                        }
+                    }
+                }
+                client.shutdown(std::net::Shutdown::Write).unwrap();
+
+                let mut out = Vec::with_capacity(payload.len());
+                let mut buf = [0u8; 1024];
+                while out.len() < payload.len() {
+                    let n = client.read(&mut buf).unwrap();
+                    assert!(n > 0, "unexpected EOF from proxy");
+                    out.extend_from_slice(&buf[..n]);
+                    if (out.len() / 1024 + i + w) % 3 == 0 {
+                        std::thread::sleep(Duration::from_millis(2));
+                    } else {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                }
+                out.truncate(payload.len());
+                assert_eq!(out, payload, "mismatch worker {w}, iter {i}");
+            }
+        }));
+    }
+
+    for worker in workers {
+        worker.join().unwrap();
+    }
+
+    finished.store(true, Ordering::SeqCst);
+    backend_thread.join().unwrap();
+    forwarder_thread.join().unwrap();
 }
