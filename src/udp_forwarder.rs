@@ -279,12 +279,16 @@ impl UdpForwarder {
                         }
                         if event.is_writable() {
                             let bufs: &mut _ = tokenWaitWrite.get_mut(&token).unwrap();
-                            assert!(bufs.len() > 0);
+                            if bufs.is_empty() {
+                                reset_readable(&mut poll, sock, &token);
+                                tokenWaitWrite.remove(&token);
+                                continue;
+                            }
 
                             let mut cont = true;
                             let mut nwritten = 0;
-                            while bufs.len() > 0 && cont {
-                                let buf = bufs.remove(0);
+                            while !bufs.is_empty() && cont {
+                                let buf = bufs[0].clone();
                                 let dst = if token2dst.contains_key(&token) {
                                     Some(*token2dst.get(&token).unwrap())
                                 } else {
@@ -304,6 +308,7 @@ impl UdpForwarder {
                                 match dst {
                                     Some(remote) => match sock.send_to(&buf, remote) {
                                         Ok(s) => {
+                                            bufs.remove(0);
                                             log::debug!(
                                                 "sent {} bytes to {}, data packet come from {}",
                                                 s,
@@ -313,14 +318,17 @@ impl UdpForwarder {
                                             nwritten += s;
                                         }
                                         Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                                            // Keep buffer head for next writable event.
                                             cont = false;
                                         }
                                         Err(_) => {
+                                            bufs.remove(0);
                                             cont = false;
                                             waiting_to_close.push(token);
                                         }
                                     },
                                     None => {
+                                        bufs.remove(0);
                                         waiting_to_close.push(token);
                                         break;
                                     }
@@ -333,7 +341,7 @@ impl UdpForwarder {
                                 life2token.insert(now, token);
                                 now += 1;
                             }
-                            if bufs.len() == 0 {
+                            if bufs.is_empty() {
                                 reset_readable(&mut poll, sock, &token);
                                 tokenWaitWrite.remove(&token).unwrap();
                             }

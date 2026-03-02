@@ -154,7 +154,9 @@ impl From<(Vec<(String, String)>, Vec<String>)> for RegexMultiplexer {
                             if buf.len() < 3 + domain_name.len() {
                                 return false;
                             }
-                            if buf[0] != 0x16 && buf[1] != 0x03 && buf[2] != 0x01 {
+                            // TLS handshake record with major version 0x03 and minor 0x00..0x04.
+                            // This covers SSLv3/TLS1.0/1.1/1.2 and TLS1.3-compatible records.
+                            if buf[0] != 0x16 || buf[1] != 0x03 || buf[2] > 0x04 {
                                 return false;
                             }
                             return kmp_search(buf, domain_name.as_bytes()).is_some();
@@ -233,5 +235,49 @@ impl ConnectionPlugin for RegexMultiplexer {
 
     fn transform(&mut self, _: &[u8]) -> Option<Vec<u8>> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ConnectionPlugin, RegexMultiplexer};
+
+    #[test]
+    fn https_matcher_requires_valid_tls_prefix() {
+        let mux = RegexMultiplexer::from((
+            vec![(
+                "[https:example.com]".to_string(),
+                "127.0.0.1:443".to_string(),
+            )],
+            vec!["127.0.0.1/8".to_string()],
+        ));
+
+        // Contains domain bytes but does not have a valid TLS prefix.
+        let bad = b"\x16\x99\x99....example.com....";
+        assert_eq!(
+            mux.decideTarget(bad, "127.0.0.1:12345".parse().unwrap()),
+            None
+        );
+
+        // TLS1.0 record prefix with domain should match.
+        let good = b"\x16\x03\x01....example.com....";
+        assert!(
+            mux.decideTarget(good, "127.0.0.1:12345".parse().unwrap())
+                .is_some()
+        );
+
+        // TLS1.2-compatible record prefix should also match.
+        let good_tls12 = b"\x16\x03\x03....example.com....";
+        assert!(
+            mux.decideTarget(good_tls12, "127.0.0.1:12345".parse().unwrap())
+                .is_some()
+        );
+
+        // Invalid major version should not match.
+        let bad_major = b"\x16\x04\x01....example.com....";
+        assert_eq!(
+            mux.decideTarget(bad_major, "127.0.0.1:12345".parse().unwrap()),
+            None
+        );
     }
 }
