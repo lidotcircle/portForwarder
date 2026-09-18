@@ -231,6 +231,7 @@ fn run_tcp_forwarder_at(local: &'static str, remote: &'static str, finished: Arc
         allow_nets: vec!["127.0.0.1/24".to_string(), "::1/128".to_string()],
         max_connections: 256,
         tcp_mode: TcpMode::Forward,
+        recording: None,
     };
     let forwarder = TcpForwarder::from(&config).unwrap();
     forwarder.listen(finished).unwrap();

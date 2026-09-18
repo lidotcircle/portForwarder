@@ -2,7 +2,7 @@
 extern crate portforwarder;
 
 use colored::Colorize;
-use portforwarder::forward_config::{ForwardSessionConfig, TcpMode};
+use portforwarder::forward_config::{ForwardSessionConfig, TcpMode, TrafficRecordingConfig};
 use portforwarder::tcp_udp_forwarder::TcpUdpForwarder;
 use regex::Regex;
 use std::fs;
@@ -16,7 +16,7 @@ fn usage() {
     let args: Vec<String> = std::env::args().collect();
     println!(
         "usage:
-    {} [-htu] <bind-address> <forward-address>
+    {} [options] <bind-address> <forward-address>
     {} [--socks5] <bind-address>
     {} -c <yaml-config-file>
 
@@ -26,6 +26,8 @@ fn usage() {
           support UNITs: KB MB
     -w    network whitelist, eg. 127.0.0.1/24
     -m    max connections
+    -r, --record <sqlite-file>
+          record forwarded traffic to SQLite (payload capture enabled)
     -c    config file (a yaml file)
     --socks5  run tcp listener as a SOCKS5 server (CONNECT only)
               when enabled, <forward-address> is not required
@@ -60,7 +62,12 @@ fn print_example_of_config_file() {
     conn_bufsize: 2MB
     max_connections: 10000 # optional
     allow_nets: # optional
-      - 127.0.0.0/24"
+      - 127.0.0.0/24
+    recording: # optional
+      database: traffic.sqlite3
+      capture_payload: true # set false for metadata only
+      max_payload_bytes: 64KB # per TCP chunk or UDP datagram
+      queue_capacity: 1024"
     );
 }
 
@@ -145,6 +152,42 @@ impl FromYaml for ForwardSessionConfig<String> {
             -1
         };
 
+        let recording = match &yaml["recording"] {
+            Yaml::BadValue | Yaml::Null => None,
+            Yaml::String(database) => Some(TrafficRecordingConfig::new(database)),
+            Yaml::Hash(_) => {
+                let database = match yaml["recording"]["database"].as_str() {
+                    Some(database) => database,
+                    None => return Err("recording.database is required"),
+                };
+                let mut config = TrafficRecordingConfig::new(database);
+                config.capture_payload = match &yaml["recording"]["capture_payload"] {
+                    Yaml::BadValue | Yaml::Null => true,
+                    Yaml::Boolean(value) => *value,
+                    _ => return Err("recording.capture_payload must be a boolean"),
+                };
+                if let Some(value) = yaml["recording"]["max_payload_bytes"].as_str() {
+                    config.max_payload_bytes = match convert_to_bytes(value) {
+                        Some(value) => value,
+                        None => return Err("invalid recording.max_payload_bytes"),
+                    };
+                } else if let Some(value) = yaml["recording"]["max_payload_bytes"].as_i64() {
+                    if value < 0 {
+                        return Err("recording.max_payload_bytes cannot be negative");
+                    }
+                    config.max_payload_bytes = value as usize;
+                }
+                if let Some(value) = yaml["recording"]["queue_capacity"].as_i64() {
+                    if value <= 0 {
+                        return Err("recording.queue_capacity must be greater than zero");
+                    }
+                    config.queue_capacity = value as usize;
+                }
+                Some(config)
+            }
+            _ => return Err("recording must be a database path or map"),
+        };
+
         let mut remoteMap: Vec<(String, String)> = vec![];
         if let Some(pairs) = yaml["remoteMap"].as_vec() {
             for pair in pairs {
@@ -171,6 +214,7 @@ impl FromYaml for ForwardSessionConfig<String> {
             max_connections,
             conn_bufsize,
             tcp_mode,
+            recording,
         })
     }
 }
@@ -189,6 +233,7 @@ fn main() {
     let mut config_file: Option<String> = None;
     let mut whitelist: Vec<String> = vec![];
     let mut conn_bufsize = 2 * 1024 * 1024;
+    let mut recording_database: Option<String> = None;
     args.remove(0);
     let valid_ipv4_port = Regex::new(
         r"^(([0-9]{1,3}.){3}[0-9]{1,3}|0-9]{1}|(([0-9]{1}[a-zA-Z]{1})|([a-zA-Z0-9][a-zA-Z0-9-_]{1,61}[a-zA-Z0-9]))\.([a-zA-Z]{2,6}|[a-zA-Z0-9-]{2,30}\.[a-zA-Z]{2,3})|([a-f0-9:]+:+)+[a-f0-9]+|::|localhost):[0-9]{1,5}$").unwrap();
@@ -236,6 +281,15 @@ fn main() {
             "-m" => {
                 if i + 1 < args.len() {
                     max_connections = args[i + 1].parse().unwrap();
+                    skipnext = true;
+                } else {
+                    usage();
+                    std::process::exit(1);
+                }
+            }
+            "-r" | "--record" => {
+                if i + 1 < args.len() {
+                    recording_database = Some(args[i + 1].clone());
                     skipnext = true;
                 } else {
                     usage();
@@ -330,6 +384,7 @@ fn main() {
             max_connections,
             conn_bufsize,
             tcp_mode,
+            recording: recording_database.map(TrafficRecordingConfig::new),
         });
     }
 
@@ -361,5 +416,52 @@ fn main() {
 
     for h in handlers {
         h.join().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ForwardSessionConfig, FromYaml, YamlLoader};
+
+    #[test]
+    fn parses_sqlite_recording_options() {
+        let documents = YamlLoader::load_from_str(
+            r#"local: 127.0.0.1:8080
+remote: 127.0.0.1:9000
+recording:
+  database: traffic.sqlite3
+  capture_payload: false
+  max_payload_bytes: 8KB
+  queue_capacity: 77
+"#,
+        )
+        .unwrap();
+        let config = ForwardSessionConfig::<String>::fromYaml(&documents[0]).unwrap();
+        let recording = config.recording.unwrap();
+        assert_eq!(recording.database, "traffic.sqlite3");
+        assert!(!recording.capture_payload);
+        assert_eq!(recording.max_payload_bytes, 8 * 1024);
+        assert_eq!(recording.queue_capacity, 77);
+    }
+
+    #[test]
+    fn rejects_non_boolean_payload_capture_setting() {
+        for value in ["\"false\"", "off", "0"] {
+            let yaml = format!(
+                concat!(
+                    "local: 127.0.0.1:8080\n",
+                    "remote: 127.0.0.1:9000\n",
+                    "recording:\n",
+                    "  database: traffic.sqlite3\n",
+                    "  capture_payload: {}\n"
+                ),
+                value
+            );
+            let documents = YamlLoader::load_from_str(&yaml).unwrap();
+            assert_eq!(
+                ForwardSessionConfig::<String>::fromYaml(&documents[0]).unwrap_err(),
+                "recording.capture_payload must be a boolean"
+            );
+        }
     }
 }

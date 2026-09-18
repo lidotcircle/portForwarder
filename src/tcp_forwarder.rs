@@ -1,6 +1,7 @@
 use crate::address_matcher::IpAddrMatcher;
 use crate::connection_plugin::{ConnectionPlugin, RegexMultiplexer};
 use crate::forward_config::{ForwardSessionConfig, TcpMode};
+use crate::recording::{Direction, TrafficRecorder, TrafficSession, Transport};
 use crate::utils::toSockAddr;
 use log::info;
 use mio::net::{TcpListener, TcpStream};
@@ -23,6 +24,13 @@ pub struct TcpForwarder {
     mode: TcpForwarderMode,
     max_connections: Option<u64>,
     cache_size: usize,
+    recorder: Option<TrafficRecorder>,
+}
+
+struct ActiveRecording {
+    session: TrafficSession,
+    client_to_target_bytes: u64,
+    target_to_client_bytes: u64,
 }
 
 fn SafeAddr(addr: &std::io::Result<SocketAddr>) -> String {
@@ -233,6 +241,30 @@ enum ProxyProtocol {
     HttpForward,
 }
 
+struct RelayBuffer {
+    bytes: Vec<u8>,
+    offset: usize,
+    is_forwarded_traffic: bool,
+}
+
+impl RelayBuffer {
+    fn traffic(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            offset: 0,
+            is_forwarded_traffic: true,
+        }
+    }
+
+    fn control(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            offset: 0,
+            is_forwarded_traffic: false,
+        }
+    }
+}
+
 fn proxy_protocol_tag(protocol: ProxyProtocol) -> &'static str {
     match protocol {
         ProxyProtocol::Socks5 => "SOCKS5",
@@ -253,14 +285,15 @@ struct Socks5Session {
     close_reason: Option<String>,
     close_after_flush: bool,
     client_in: Vec<u8>,
-    c2r_queue: VecDeque<(Vec<u8>, usize)>,
-    r2c_queue: VecDeque<(Vec<u8>, usize)>,
+    c2r_queue: VecDeque<RelayBuffer>,
+    r2c_queue: VecDeque<RelayBuffer>,
     up_bytes: u64,
     down_bytes: u64,
     client_eof: bool,
     remote_eof: bool,
     client_write_shutdown: bool,
     remote_write_shutdown: bool,
+    recording: Option<TrafficSession>,
 }
 
 impl Socks5Session {
@@ -285,6 +318,7 @@ impl Socks5Session {
             remote_eof: false,
             client_write_shutdown: false,
             remote_write_shutdown: false,
+            recording: None,
         }
     }
 }
@@ -292,6 +326,18 @@ impl Socks5Session {
 impl TcpForwarder {
     pub fn from<T: ToSocketAddrs>(
         config: &ForwardSessionConfig<T>,
+    ) -> std::io::Result<TcpForwarder> {
+        let recorder = config
+            .recording
+            .as_ref()
+            .map(TrafficRecorder::open)
+            .transpose()?;
+        Self::from_with_recorder(config, recorder)
+    }
+
+    pub(crate) fn from_with_recorder<T: ToSocketAddrs>(
+        config: &ForwardSessionConfig<T>,
+        recorder: Option<TrafficRecorder>,
     ) -> std::io::Result<TcpForwarder> {
         let mode = match config.tcp_mode {
             TcpMode::Forward => TcpForwarderMode::Forward(Box::new(RegexMultiplexer::from((
@@ -311,6 +357,7 @@ impl TcpForwarder {
                 None
             },
             cache_size: config.conn_bufsize,
+            recorder,
         })
     }
 
@@ -360,6 +407,7 @@ impl TcpForwarder {
         let mut token2buffer: HashMap<Token, (Vec<_>, usize)> = HashMap::new();
         let mut shutdownMe: HashSet<Token> = HashSet::new();
         let mut alreadyShutdown: HashSet<Token> = HashSet::new();
+        let mut record_sessions: HashMap<Token, ActiveRecording> = HashMap::new();
 
         let removeConn =
             |tk: Token,
@@ -369,7 +417,8 @@ impl TcpForwarder {
              token2connss: &mut HashMap<Token, Rc<RefCell<TcpStream>>>,
              token2buffer: &mut HashMap<Token, (Vec<_>, usize)>,
              shutdownMe: &mut HashSet<Token>,
-             alreadyShutdown: &mut HashSet<Token>| {
+             alreadyShutdown: &mut HashSet<Token>,
+             record_sessions: &mut HashMap<Token, ActiveRecording>| {
                 let (t1, t2) = if tk.0 % 2 == 0 {
                     (tk, Token(tk.0 + 1))
                 } else {
@@ -379,6 +428,17 @@ impl TcpForwarder {
                 // prevent double clear
                 if !token2stream.contains_key(&t1) {
                     return;
+                }
+
+                if let Some(active) = record_sessions.remove(&t1) {
+                    if let Some(recorder) = self.recorder.as_ref() {
+                        recorder.end_session(
+                            active.session,
+                            active.client_to_target_bytes,
+                            active.target_to_client_bytes,
+                            "connection closed",
+                        );
+                    }
                 }
 
                 info!(
@@ -425,6 +485,16 @@ impl TcpForwarder {
 
         loop {
             if closed.load(std::sync::atomic::Ordering::SeqCst) {
+                if let Some(recorder) = self.recorder.as_ref() {
+                    for (_, active) in record_sessions.drain() {
+                        recorder.end_session(
+                            active.session,
+                            active.client_to_target_bytes,
+                            active.target_to_client_bytes,
+                            "forwarder stopped",
+                        );
+                    }
+                }
                 log::debug!(
                     "tcp forwarder closed: inComingPeerRecieveBytes = {inComingPeerRecieveBytes}, inComingPeerSendBytes = {inComingPeerSendBytes}, outGoingPeerRecieveBytes = {outGoingPeerRecieveBytes}, outGoingPeerSendBytes = {outGoingPeerSendBytes}"
                 );
@@ -477,6 +547,24 @@ impl TcpForwarder {
                                             token2connss.insert(nt, Rc::new(RefCell::new(conn)));
                                             token2stat.insert(t, Interest::READABLE);
                                             token2stat.insert(nt, Interest::READABLE);
+                                            if let Some(recorder) = self.recorder.as_ref() {
+                                                let session = recorder.start_session(
+                                                    Transport::Tcp,
+                                                    Some("forward"),
+                                                    addr,
+                                                    self.local_addr,
+                                                    remote,
+                                                    None,
+                                                );
+                                                record_sessions.insert(
+                                                    t,
+                                                    ActiveRecording {
+                                                        session,
+                                                        client_to_target_bytes: 0,
+                                                        target_to_client_bytes: 0,
+                                                    },
+                                                );
+                                            }
                                             info!(
                                                 "accept connection from {} to {}, current connections: {}",
                                                 addr,
@@ -560,6 +648,7 @@ impl TcpForwarder {
                                                     &mut token2buffer,
                                                     &mut shutdownMe,
                                                     &mut alreadyShutdown,
+                                                    &mut record_sessions,
                                                 );
                                                 break;
                                             } else {
@@ -582,6 +671,7 @@ impl TcpForwarder {
                                                 &mut token2buffer,
                                                 &mut shutdownMe,
                                                 &mut alreadyShutdown,
+                                                &mut record_sessions,
                                             );
                                             break;
                                         }
@@ -616,6 +706,33 @@ impl TcpForwarder {
                                                     peerConnOpt = Some(
                                                         token2connss.get(&tk2).unwrap().clone(),
                                                     );
+                                                    if let Some(recorder) = self.recorder.as_ref() {
+                                                        let client_token = if tk.0 % 2 == 0 {
+                                                            tk
+                                                        } else {
+                                                            Token(tk.0 - 1)
+                                                        };
+                                                        let client_addr = token2stream
+                                                            .get(&client_token)
+                                                            .unwrap()
+                                                            .1;
+                                                        let session = recorder.start_session(
+                                                            Transport::Tcp,
+                                                            Some("forward"),
+                                                            client_addr,
+                                                            self.local_addr,
+                                                            addr,
+                                                            None,
+                                                        );
+                                                        record_sessions.insert(
+                                                            client_token,
+                                                            ActiveRecording {
+                                                                session,
+                                                                client_to_target_bytes: 0,
+                                                                target_to_client_bytes: 0,
+                                                            },
+                                                        );
+                                                    }
                                                     info!("create connection to {}", addr);
                                                     Some(token2connss.get(&tk2).unwrap().clone())
                                                 }
@@ -643,6 +760,7 @@ impl TcpForwarder {
                                             &mut token2buffer,
                                             &mut shutdownMe,
                                             &mut alreadyShutdown,
+                                            &mut record_sessions,
                                         );
                                     } else {
                                         match &mut token2buffer.get_mut(&tk2) {
@@ -694,6 +812,7 @@ impl TcpForwarder {
                                     &mut token2buffer,
                                     &mut shutdownMe,
                                     &mut alreadyShutdown,
+                                    &mut record_sessions,
                                 );
                                 break;
                             }
@@ -732,6 +851,22 @@ impl TcpForwarder {
                                     inComingPeerSendBytes += s as u64;
                                 } else {
                                     outGoingPeerSendBytes += s as u64;
+                                }
+                                if s > 0 {
+                                    let client_token =
+                                        if tk.0 % 2 == 0 { tk } else { Token(tk.0 - 1) };
+                                    if let Some(active) = record_sessions.get_mut(&client_token) {
+                                        let direction = if tk.0 % 2 == 0 {
+                                            active.target_to_client_bytes += s as u64;
+                                            Direction::TargetToClient
+                                        } else {
+                                            active.client_to_target_bytes += s as u64;
+                                            Direction::ClientToTarget
+                                        };
+                                        if let Some(recorder) = self.recorder.as_ref() {
+                                            recorder.record(&active.session, direction, &buf[..s]);
+                                        }
+                                    }
                                 }
                                 let bb = bufstat.0.remove(0);
                                 nwrited += s;
@@ -782,6 +917,7 @@ impl TcpForwarder {
                                                 &mut token2buffer,
                                                 &mut shutdownMe,
                                                 &mut alreadyShutdown,
+                                                &mut record_sessions,
                                             );
                                         } else {
                                             clear_writable(
@@ -823,6 +959,7 @@ impl TcpForwarder {
                                         &mut token2buffer,
                                         &mut shutdownMe,
                                         &mut alreadyShutdown,
+                                        &mut record_sessions,
                                     );
                                 }
                                 break;
@@ -859,12 +996,17 @@ impl TcpForwarder {
             response
         }
 
-        fn flush_queue(
+        fn flush_queue<F>(
             stream: &mut TcpStream,
-            queue: &mut VecDeque<(Vec<u8>, usize)>,
-        ) -> io::Result<()> {
-            while let Some((buf, off)) = queue.front_mut() {
-                match stream.write(&buf[*off..]) {
+            queue: &mut VecDeque<RelayBuffer>,
+            mut on_write: F,
+        ) -> io::Result<()>
+        where
+            F: FnMut(&[u8]),
+        {
+            while let Some(pending) = queue.front_mut() {
+                let start = pending.offset;
+                match stream.write(&pending.bytes[pending.offset..]) {
                     Ok(0) => {
                         return Err(io::Error::new(
                             io::ErrorKind::WriteZero,
@@ -872,8 +1014,11 @@ impl TcpForwarder {
                         ));
                     }
                     Ok(n) => {
-                        *off += n;
-                        if *off >= buf.len() {
+                        if pending.is_forwarded_traffic {
+                            on_write(&pending.bytes[start..start + n]);
+                        }
+                        pending.offset += n;
+                        if pending.offset >= pending.bytes.len() {
                             queue.pop_front();
                         }
                     }
@@ -1135,6 +1280,7 @@ impl TcpForwarder {
             sessions: &mut HashMap<Token, Socks5Session>,
             remote_to_client: &mut HashMap<Token, Token>,
             client_token: Token,
+            recorder: Option<&TrafficRecorder>,
         ) {
             if let Some(mut sess) = sessions.remove(&client_token) {
                 let _ = poll.registry().deregister(&mut sess.client);
@@ -1152,6 +1298,9 @@ impl TcpForwarder {
                 let reason = sess
                     .close_reason
                     .unwrap_or_else(|| "closed by peer".to_string());
+                if let (Some(recorder), Some(recording)) = (recorder, sess.recording.take()) {
+                    recorder.end_session(recording, sess.up_bytes, sess.down_bytes, reason.clone());
+                }
                 let protocol = proxy_protocol_tag(sess.protocol);
                 if sess.state == Socks5SessionState::Relay {
                     info!(
@@ -1182,6 +1331,21 @@ impl TcpForwarder {
 
         loop {
             if closed.load(std::sync::atomic::Ordering::SeqCst) {
+                let open_sessions: Vec<Token> = sessions.keys().copied().collect();
+                for token in &open_sessions {
+                    if let Some(session) = sessions.get_mut(token) {
+                        session.close_reason = Some("forwarder stopped".to_string());
+                    }
+                }
+                for token in open_sessions {
+                    close_session(
+                        &mut poll,
+                        &mut sessions,
+                        &mut remote_to_client,
+                        token,
+                        self.recorder.as_ref(),
+                    );
+                }
                 return Ok(());
             }
 
@@ -1241,8 +1405,8 @@ impl TcpForwarder {
                                     break;
                                 }
                                 Ok(n) => {
-                                    sess.down_bytes += n as u64;
-                                    sess.r2c_queue.push_back((buf[0..n].to_vec(), 0));
+                                    sess.r2c_queue
+                                        .push_back(RelayBuffer::traffic(buf[0..n].to_vec()));
                                 }
                                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
                                 Err(err) => {
@@ -1259,19 +1423,17 @@ impl TcpForwarder {
                             if let Some(err) = connect_err {
                                 match sess.protocol {
                                     ProxyProtocol::Socks5 => {
-                                        sess.r2c_queue.push_back((
+                                        sess.r2c_queue.push_back(RelayBuffer::control(
                                             encode_socks5_reply(
                                                 0x05,
                                                 SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
                                             ),
-                                            0,
                                         ));
                                     }
                                     ProxyProtocol::HttpTunnel | ProxyProtocol::HttpForward => {
-                                        sess.r2c_queue.push_back((
+                                        sess.r2c_queue.push_back(RelayBuffer::control(
                                             b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n"
                                                 .to_vec(),
-                                            0,
                                         ));
                                     }
                                     ProxyProtocol::Unknown => {}
@@ -1288,13 +1450,13 @@ impl TcpForwarder {
                                     .unwrap_or(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)));
                                 match sess.protocol {
                                     ProxyProtocol::Socks5 => {
-                                        sess.r2c_queue
-                                            .push_back((encode_socks5_reply(0x00, bound), 0));
+                                        sess.r2c_queue.push_back(RelayBuffer::control(
+                                            encode_socks5_reply(0x00, bound),
+                                        ));
                                     }
                                     ProxyProtocol::HttpTunnel => {
-                                        sess.r2c_queue.push_back((
+                                        sess.r2c_queue.push_back(RelayBuffer::control(
                                             b"HTTP/1.1 200 Connection Established\r\n\r\n".to_vec(),
-                                            0,
                                         ));
                                     }
                                     ProxyProtocol::HttpForward | ProxyProtocol::Unknown => {}
@@ -1313,15 +1475,26 @@ impl TcpForwarder {
                                 );
                                 if !sess.client_in.is_empty() {
                                     let extra = std::mem::take(&mut sess.client_in);
-                                    sess.up_bytes += extra.len() as u64;
-                                    sess.c2r_queue.push_back((extra, 0));
+                                    sess.c2r_queue.push_back(RelayBuffer::traffic(extra));
                                 }
                             }
                         }
 
                         if !sess.c2r_queue.is_empty() && sess.state == Socks5SessionState::Relay {
+                            let recording = sess.recording.clone();
+                            let recorder = self.recorder.as_ref();
                             let remote = sess.remote.as_mut().unwrap();
-                            if let Err(err) = flush_queue(remote, &mut sess.c2r_queue) {
+                            let mut forwarded_bytes = 0u64;
+                            let result = flush_queue(remote, &mut sess.c2r_queue, |data| {
+                                forwarded_bytes += data.len() as u64;
+                                if let (Some(recorder), Some(recording)) =
+                                    (recorder, recording.as_ref())
+                                {
+                                    recorder.record(recording, Direction::ClientToTarget, data);
+                                }
+                            });
+                            sess.up_bytes += forwarded_bytes;
+                            if let Err(err) = result {
                                 sess.close_reason = Some(format!("remote write error: {}", err));
                                 to_close.push(client_token);
                             }
@@ -1366,8 +1539,8 @@ impl TcpForwarder {
                                 }
                                 Ok(n) => {
                                     if sess.state == Socks5SessionState::Relay {
-                                        sess.up_bytes += n as u64;
-                                        sess.c2r_queue.push_back((buf[0..n].to_vec(), 0));
+                                        sess.c2r_queue
+                                            .push_back(RelayBuffer::traffic(buf[0..n].to_vec()));
                                     } else {
                                         sess.client_in.extend_from_slice(&buf[0..n]);
                                     }
@@ -1383,7 +1556,19 @@ impl TcpForwarder {
                     }
 
                     if event.is_writable() {
-                        if let Err(err) = flush_queue(&mut sess.client, &mut sess.r2c_queue) {
+                        let recording = sess.recording.clone();
+                        let recorder = self.recorder.as_ref();
+                        let mut forwarded_bytes = 0u64;
+                        let result = flush_queue(&mut sess.client, &mut sess.r2c_queue, |data| {
+                            forwarded_bytes += data.len() as u64;
+                            if let (Some(recorder), Some(recording)) =
+                                (recorder, recording.as_ref())
+                            {
+                                recorder.record(recording, Direction::TargetToClient, data);
+                            }
+                        });
+                        sess.down_bytes += forwarded_bytes;
+                        if let Err(err) = result {
                             sess.close_reason = Some(format!("client write error: {}", err));
                             to_close.push(client_token);
                         }
@@ -1432,8 +1617,8 @@ impl TcpForwarder {
                                             protocol, sess.client_addr, target_label
                                         );
                                         if !upstream.is_empty() {
-                                            sess.up_bytes += upstream.len() as u64;
-                                            sess.c2r_queue.push_back((upstream, 0));
+                                            sess.c2r_queue
+                                                .push_back(RelayBuffer::traffic(upstream));
                                             if sess.protocol == ProxyProtocol::HttpForward {
                                                 sess.client_in.clear();
                                             }
@@ -1450,12 +1635,21 @@ impl TcpForwarder {
                                                 sess.remote = Some(remote);
                                                 remote_to_client.insert(rtk, client_token);
                                                 sess.state = Socks5SessionState::Connecting;
+                                                if let Some(recorder) = self.recorder.as_ref() {
+                                                    sess.recording = Some(recorder.start_session(
+                                                        Transport::Tcp,
+                                                        Some(proxy_protocol_tag(sess.protocol)),
+                                                        sess.client_addr,
+                                                        self.local_addr,
+                                                        target,
+                                                        Some(&target_label),
+                                                    ));
+                                                }
                                             }
                                             Err(err) => {
-                                                sess.r2c_queue.push_back((
+                                                sess.r2c_queue.push_back(RelayBuffer::control(
                                                     b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n"
                                                         .to_vec(),
-                                                    0,
                                                 ));
                                                 sess.close_after_flush = true;
                                                 sess.state = Socks5SessionState::Closing;
@@ -1490,7 +1684,8 @@ impl TcpForwarder {
                                 let methods = sess.client_in[2..2 + nmethods].to_vec();
                                 sess.client_in.drain(0..2 + nmethods);
                                 if methods.contains(&0x00) {
-                                    sess.r2c_queue.push_back((vec![0x05, 0x00], 0));
+                                    sess.r2c_queue
+                                        .push_back(RelayBuffer::control(vec![0x05, 0x00]));
                                     sess.state = Socks5SessionState::Request;
                                     let protocol = proxy_protocol_tag(sess.protocol);
                                     log::debug!(
@@ -1499,7 +1694,8 @@ impl TcpForwarder {
                                         sess.client_addr
                                     );
                                 } else {
-                                    sess.r2c_queue.push_back((vec![0x05, 0xFF], 0));
+                                    sess.r2c_queue
+                                        .push_back(RelayBuffer::control(vec![0x05, 0xFF]));
                                     sess.close_after_flush = true;
                                     sess.state = Socks5SessionState::Closing;
                                     sess.close_reason =
@@ -1531,9 +1727,19 @@ impl TcpForwarder {
                                                 sess.remote = Some(remote);
                                                 remote_to_client.insert(rtk, client_token);
                                                 sess.state = Socks5SessionState::Connecting;
+                                                if let Some(recorder) = self.recorder.as_ref() {
+                                                    sess.recording = Some(recorder.start_session(
+                                                        Transport::Tcp,
+                                                        Some(proxy_protocol_tag(sess.protocol)),
+                                                        sess.client_addr,
+                                                        self.local_addr,
+                                                        target,
+                                                        Some(&target_label),
+                                                    ));
+                                                }
                                             }
                                             Err(err) => {
-                                                sess.r2c_queue.push_back((
+                                                sess.r2c_queue.push_back(RelayBuffer::control(
                                                     encode_socks5_reply(
                                                         0x05,
                                                         SocketAddr::from((
@@ -1541,7 +1747,6 @@ impl TcpForwarder {
                                                             0,
                                                         )),
                                                     ),
-                                                    0,
                                                 ));
                                                 sess.close_after_flush = true;
                                                 sess.state = Socks5SessionState::Closing;
@@ -1562,12 +1767,11 @@ impl TcpForwarder {
                                         } else {
                                             0x01
                                         };
-                                        sess.r2c_queue.push_back((
+                                        sess.r2c_queue.push_back(RelayBuffer::control(
                                             encode_socks5_reply(
                                                 rep,
                                                 SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
                                             ),
-                                            0,
                                         ));
                                         sess.close_after_flush = true;
                                         sess.state = Socks5SessionState::Closing;
@@ -1603,6 +1807,7 @@ impl TcpForwarder {
                     &mut sessions,
                     &mut remote_to_client,
                     client_token,
+                    self.recorder.as_ref(),
                 );
             }
         }

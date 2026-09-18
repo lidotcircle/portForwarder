@@ -29,6 +29,7 @@ fn run_proxy(local: &'static str, finished: Arc<AtomicBool>) {
         allow_nets: vec!["127.0.0.1/24".to_string()],
         max_connections: 256,
         tcp_mode: TcpMode::Socks5Server,
+        recording: None,
     };
     let forwarder = TcpForwarder::from(&config).unwrap();
     forwarder.listen(finished).unwrap();

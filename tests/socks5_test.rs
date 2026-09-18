@@ -59,6 +59,7 @@ fn run_socks5_forwarder(finished: Arc<AtomicBool>) {
         allow_nets: vec!["127.0.0.1/24".to_string()],
         max_connections: 10,
         tcp_mode: TcpMode::Socks5Server,
+        recording: None,
     };
     let forwarder = TcpForwarder::from(&config).unwrap();
     forwarder.listen(finished).unwrap();

@@ -15,6 +15,7 @@ use std::time;
 
 use crate::connection_plugin::{ConnectionPlugin, RegexMultiplexer};
 use crate::forward_config::ForwardSessionConfig;
+use crate::recording::{Direction, TrafficRecorder, TrafficSession, Transport};
 use crate::utils;
 
 use mio::net::UdpSocket;
@@ -24,6 +25,13 @@ pub struct UdpForwarder {
     bindAddr: SocketAddr,
     plugin: Box<dyn ConnectionPlugin + Send + Sync>,
     max_connections: Option<u64>,
+    recorder: Option<TrafficRecorder>,
+}
+
+struct ActiveRecording {
+    session: TrafficSession,
+    client_to_target_bytes: u64,
+    target_to_client_bytes: u64,
 }
 
 fn next(token: &mut Token) -> Token {
@@ -49,6 +57,18 @@ impl UdpForwarder {
     pub fn from<T: ToSocketAddrs>(
         config: &ForwardSessionConfig<T>,
     ) -> Result<UdpForwarder, Box<dyn Error>> {
+        let recorder = config
+            .recording
+            .as_ref()
+            .map(TrafficRecorder::open)
+            .transpose()?;
+        Self::from_with_recorder(config, recorder)
+    }
+
+    pub(crate) fn from_with_recorder<T: ToSocketAddrs>(
+        config: &ForwardSessionConfig<T>,
+        recorder: Option<TrafficRecorder>,
+    ) -> Result<UdpForwarder, Box<dyn Error>> {
         let baddr = utils::toSockAddr(&config.local);
 
         Ok(UdpForwarder {
@@ -62,6 +82,7 @@ impl UdpForwarder {
             } else {
                 None
             },
+            recorder,
         })
     }
 
@@ -82,7 +103,8 @@ impl UdpForwarder {
         let mut life2token: BTreeMap<u128, Token> = BTreeMap::new();
         let mut token2life: HashMap<Token, u128> = HashMap::new();
         let mut token2dst: HashMap<Token, SocketAddr> = HashMap::new();
-        let mut writeBackQueue: Queue<(SocketAddr, Vec<u8>)> = Queue::new();
+        let mut token2record: HashMap<Token, ActiveRecording> = HashMap::new();
+        let mut writeBackQueue: Queue<(Token, SocketAddr, SocketAddr, Vec<u8>)> = Queue::new();
 
         let mut udpfd = match UdpSocket::bind(self.bindAddr) {
             Ok(l) => l,
@@ -116,7 +138,9 @@ impl UdpForwarder {
                 waiting_to_close.push(outdate.1.clone());
             }
             for t in &waiting_to_close {
-                let k = token2life.remove(&t).unwrap();
+                let Some(k) = token2life.remove(&t) else {
+                    continue;
+                };
                 life2token.remove(&k).unwrap();
                 let addr = *token2addr.get(&t).unwrap();
                 addr2token.remove(&addr);
@@ -124,11 +148,31 @@ impl UdpForwarder {
                 token2socket.remove(&t).unwrap();
                 tokenWaitWrite.remove(&t);
                 token2dst.remove(&t);
+                if let Some(active) = token2record.remove(t) {
+                    if let Some(recorder) = self.recorder.as_ref() {
+                        recorder.end_session(
+                            active.session,
+                            active.client_to_target_bytes,
+                            active.target_to_client_bytes,
+                            "UDP session expired or closed",
+                        );
+                    }
+                }
             }
             waiting_to_close.clear();
 
             let rs = poll.poll(&mut events, Some(time::Duration::from_millis(1000)));
             if closed.load(Ordering::SeqCst) {
+                if let Some(recorder) = self.recorder.as_ref() {
+                    for (_, active) in token2record.drain() {
+                        recorder.end_session(
+                            active.session,
+                            active.client_to_target_bytes,
+                            active.target_to_client_bytes,
+                            "forwarder stopped",
+                        );
+                    }
+                }
                 return Ok(());
             }
 
@@ -216,9 +260,22 @@ impl UdpForwarder {
                             assert!(writeBackQueue.size() > 0);
                             let mut cont = true;
                             while writeBackQueue.size() > 0 && cont {
-                                let (addr, buf) = writeBackQueue.remove().unwrap();
+                                let (session_token, peer_addr, addr, buf) =
+                                    writeBackQueue.remove().unwrap();
                                 match udpfd.send_to(&buf, addr) {
                                     Ok(n) => {
+                                        if let Some(active) = token2record.get_mut(&session_token) {
+                                            active.target_to_client_bytes += n as u64;
+                                            if let Some(recorder) = self.recorder.as_ref() {
+                                                recorder.record_with_endpoints(
+                                                    &active.session,
+                                                    Direction::TargetToClient,
+                                                    peer_addr,
+                                                    addr,
+                                                    &buf[..n],
+                                                );
+                                            }
+                                        }
                                         log::debug!(
                                             "send back {}/{n} bytes to {}, remain {}",
                                             buf.len(),
@@ -257,7 +314,12 @@ impl UdpForwarder {
                                             reset_readable_writable(&mut poll, &mut udpfd, &t1);
                                         }
                                         writeBackQueue
-                                            .add((addr, Vec::from(&read_buf[0..size])))
+                                            .add((
+                                                token,
+                                                peerAddr,
+                                                addr,
+                                                Vec::from(&read_buf[0..size]),
+                                            ))
                                             .unwrap();
 
                                         let oldLife = token2life.get(&token).unwrap();
@@ -295,19 +357,48 @@ impl UdpForwarder {
                                     let target = self
                                         .plugin
                                         .decideTarget(&buf, *token2addr.get(&token).unwrap());
-                                    if target.is_some() {
+                                    if let Some(remote) = target {
                                         log::debug!(
                                             "forward udp packet from {} to {}",
                                             token2addr.get(&token).unwrap(),
-                                            target.unwrap()
+                                            remote
                                         );
-                                        token2dst.insert(token, target.unwrap());
+                                        token2dst.insert(token, remote);
+                                        if let Some(recorder) = self.recorder.as_ref() {
+                                            let client_addr = *token2addr.get(&token).unwrap();
+                                            let session = recorder.start_session(
+                                                Transport::Udp,
+                                                Some("forward"),
+                                                client_addr,
+                                                self.bindAddr,
+                                                remote,
+                                                None,
+                                            );
+                                            token2record.insert(
+                                                token,
+                                                ActiveRecording {
+                                                    session,
+                                                    client_to_target_bytes: 0,
+                                                    target_to_client_bytes: 0,
+                                                },
+                                            );
+                                        }
                                     }
                                     target
                                 };
                                 match dst {
                                     Some(remote) => match sock.send_to(&buf, remote) {
                                         Ok(s) => {
+                                            if let Some(active) = token2record.get_mut(&token) {
+                                                active.client_to_target_bytes += s as u64;
+                                                if let Some(recorder) = self.recorder.as_ref() {
+                                                    recorder.record(
+                                                        &active.session,
+                                                        Direction::ClientToTarget,
+                                                        &buf[..s],
+                                                    );
+                                                }
+                                            }
                                             bufs.remove(0);
                                             log::debug!(
                                                 "sent {} bytes to {}, data packet come from {}",

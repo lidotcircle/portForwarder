@@ -1,4 +1,5 @@
 use crate::forward_config::ForwardSessionConfig;
+use crate::recording::TrafficRecorder;
 use crate::tcp_forwarder::TcpForwarder;
 use crate::udp_forwarder::UdpForwarder;
 use std::error::Error;
@@ -10,6 +11,7 @@ use std::sync::{Arc, atomic::AtomicBool};
 pub struct TcpUdpForwarder {
     udp: Arc<Option<UdpForwarder>>,
     tcpe: Arc<Option<TcpForwarder>>,
+    recorder: Option<TrafficRecorder>,
 }
 
 impl TcpUdpForwarder {
@@ -21,16 +23,22 @@ impl TcpUdpForwarder {
 
         let mut udpi = None;
         let mut tcpei = None;
+        let recorder = config
+            .recording
+            .as_ref()
+            .map(TrafficRecorder::open)
+            .transpose()?;
         if config.enable_tcp {
-            tcpei = Some(TcpForwarder::from(&config).unwrap());
+            tcpei = Some(TcpForwarder::from_with_recorder(config, recorder.clone())?);
         }
         if config.enable_udp {
-            udpi = Some(UdpForwarder::from(&config).unwrap());
+            udpi = Some(UdpForwarder::from_with_recorder(config, recorder.clone())?);
         }
 
         Ok(TcpUdpForwarder {
             udp: Arc::from(udpi),
             tcpe: Arc::from(tcpei),
+            recorder,
         })
     }
 
@@ -38,6 +46,7 @@ impl TcpUdpForwarder {
         let mut tte = None;
         let mut tu = None;
         let closed = Arc::new(AtomicBool::from(false));
+        let recorder = self.recorder.clone();
         if self.tcpe.is_some() {
             let m = self.tcpe.clone();
             let tcp_closed = closed.clone();
@@ -64,6 +73,9 @@ impl TcpUdpForwarder {
             }
             if tu.is_some() {
                 tu.unwrap().join().unwrap_or_default();
+            }
+            if let Some(recorder) = recorder {
+                recorder.flush();
             }
         };
         return Box::new(close_handler);

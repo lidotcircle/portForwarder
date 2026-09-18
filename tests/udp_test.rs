@@ -158,6 +158,7 @@ fn run_udp_forwarder_at(local: &'static str, remote: &'static str, finished: Arc
         allow_nets: ["127.0.0.1/24".to_string(), "::1/128".to_string()].to_vec(),
         max_connections: 256,
         tcp_mode: TcpMode::Forward,
+        recording: None,
     };
     let forwarder_wrap = UdpForwarder::from(&config);
     assert!(forwarder_wrap.is_ok());
